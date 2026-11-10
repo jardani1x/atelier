@@ -2,8 +2,10 @@ import type { Door, Point, Wall, Window } from '$lib/models/types';
 
 /**
  * Finds straight horizontal and vertical walls in a floor plan image, then reads the gaps between
- * collinear walls as doors and windows. Everything here works in image pixels until
- * draftToElements converts the reviewed result to plan centimetres.
+ * collinear walls, and between a wall end and the wall it faces, as doors and windows. Walls are
+ * found one thickness class at a time, so thin partitions survive next to thick structural walls.
+ * Everything here works in image pixels until draftToElements converts the reviewed result to
+ * plan centimetres.
  */
 export interface PlanRaster { width: number; height: number; data: Uint8ClampedArray }
 export interface DraftWall { start: Point; end: Point; thickness: number }
@@ -24,12 +26,24 @@ const DOOR_CM = [55, 300] as const;
 const WINDOW_CM = [40, 500] as const;
 /** Glazing lines usually fill this share of a window gap; a door gap is nearly blank. */
 const WINDOW_INK = 0.12;
+/** A glazing line runs the length of the gap; a door leaf or swing arc only crosses it. */
+const GLAZING_RUN = 0.8;
+/** Share of a quarter circle about a jamb that must be drawn before it counts as a door swing. */
+const SWING_ARC = 0.8;
+/** Luma step that separates a thin drawn line from the floor fill on both sides of it. */
+const LINE_CONTRAST = 20;
+/** Structural walls, partitions, and one finer class; each class is thinner than the last. */
+const MAX_THICKNESS_CLASSES = 3;
+const NEXT_CLASS_RATIO = 0.6;
+/** Drawn door swings needed before the plan is trusted to draw one on every door. */
+const SWINGS_FOR_PASSAGES = 2;
 
 type Mask = Uint8Array;
 interface Line { pos: number; a: number; b: number; thickness: number; gaps: Gap[]; linked: boolean }
-interface Gap { from: number; to: number; kind: 'door' | 'window' }
+/** A blank gap has no swing or glazing drawn in it: a door on a plan that draws none, otherwise an open passage. */
+interface Gap { from: number; to: number; kind: 'door' | 'window' | 'blank' }
 
-function inkMask({ width, height, data }: PlanRaster): Mask {
+function inkMask({ width, height, data }: PlanRaster): { ink: Mask; gray: Uint8Array } {
   const gray = new Uint8Array(width * height);
   const histogram = new Array<number>(256).fill(0);
   for (let i = 0; i < gray.length; i++) {
@@ -53,7 +67,27 @@ function inkMask({ width, height, data }: PlanRaster): Mask {
   }
   const mask = new Uint8Array(gray.length);
   for (let i = 0; i < gray.length; i++) mask[i] = gray[i] <= threshold ? 1 : 0;
-  return mask;
+  return { ink: mask, gray };
+}
+
+/**
+ * Ink plus thin lines too pale for the ink threshold, such as grey glazing lines and door swings
+ * drawn over a tinted floor. A pixel counts when it is darker than both neighbours a few pixels
+ * away on one axis, which a shadow or a change of floor colour is not.
+ */
+function drawnMask(gray: Uint8Array, ink: Mask, width: number, height: number, reach: number): Mask {
+  const out = Uint8Array.from(ink);
+  const offsets = [...new Set([2, 4, Math.max(2, Math.ceil(reach))])];
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const i = y * width + x;
+    if (out[i]) continue;
+    const level = gray[i] + LINE_CONTRAST;
+    for (const d of offsets) {
+      if ((x >= d && x + d < width && gray[i - d] >= level && gray[i + d] >= level)
+        || (y >= d && y + d < height && gray[i - d * width] >= level && gray[i + d * width] >= level)) { out[i] = 1; break; }
+    }
+  }
+  return out;
 }
 
 function dilateAxis(source: Mask, width: number, height: number, radius: number, horizontal: boolean): Mask {
@@ -86,8 +120,8 @@ function transpose(mask: Mask, width: number, height: number): Mask {
   return out;
 }
 
-/** The most common stroke width that is plausible for a real wall at this scale. */
-function wallThickness(mask: Mask, width: number, height: number, cmPerPixel: number): number {
+/** The most common stroke width between the given bounds, or 0 when there is none. */
+function wallThickness(mask: Mask, width: number, height: number, low: number, high: number): number {
   const horizontal = new Uint16Array(mask.length);
   for (let y = 0; y < height; y++) for (let x = 0; x < width;) {
     if (!mask[y * width + x]) { x++; continue; }
@@ -107,8 +141,6 @@ function wallThickness(mask: Mask, width: number, height: number, cmPerPixel: nu
     }
     y = end;
   }
-  const low = Math.max(2, MIN_WALL_CM / cmPerPixel);
-  const high = MAX_WALL_CM / cmPerPixel;
   let thickness = 0, most = 0;
   for (const [stroke, count] of histogram) {
     if (stroke >= low && stroke <= high && count > most) { most = count; thickness = stroke; }
@@ -164,8 +196,61 @@ function gapInk(ink: Mask, width: number, line: Line, from: number, to: number, 
   return total ? hits / total : 0;
 }
 
+/** True when one row of the wall band is drawn along nearly the whole gap, as glazing is. */
+function glazingRun(drawn: Mask, width: number, height: number, line: Line, from: number, to: number): boolean {
+  const inset = (to - from) * 0.1;
+  const first = Math.ceil(from + inset), last = Math.floor(to - inset);
+  if (last <= first) return false;
+  const half = Math.max(2, line.thickness / 2);
+  for (let y = Math.max(1, Math.floor(line.pos - half)); y <= Math.min(height - 2, Math.ceil(line.pos + half)); y++) {
+    let hits = 0;
+    // A scanned line wanders by a pixel, so the rows either side count too.
+    for (let x = Math.max(0, first); x < Math.min(width, last); x++) {
+      if (drawn[y * width + x] || drawn[(y - 1) * width + x] || drawn[(y + 1) * width + x]) hits++;
+    }
+    if (hits >= GLAZING_RUN * (last - first)) return true;
+  }
+  return false;
+}
+
+/** True when a quarter circle is drawn about either jamb, which only a door swing does. */
+function swingArc(drawn: Mask, width: number, height: number, pos: number, from: number, to: number): boolean {
+  const gap = to - from;
+  const near = (x: number, y: number) => {
+    const cx = Math.round(x), cy = Math.round(y);
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const px = cx + dx, py = cy + dy;
+      if (px >= 0 && py >= 0 && px < width && py < height && drawn[py * width + px]) return true;
+    }
+    return false;
+  };
+  const angles: [number, number][] = [];
+  // The ends of the arc meet the wall and the leaf, which would count for any gap.
+  for (let degrees = 15; degrees <= 75; degrees += 3) angles.push([Math.cos(degrees * Math.PI / 180), Math.sin(degrees * Math.PI / 180)]);
+  // A leaf can be narrower than the gap: the smaller leaf of an unequal pair, or a door in a wide frame.
+  for (let radius = Math.max(4, gap * 0.45); radius <= gap * 1.08; radius++) {
+    for (const [hinge, along] of [[from, 1], [to, -1]]) for (const side of [-1, 1]) {
+      let hits = 0;
+      for (const [c, s] of angles) if (near(hinge + along * radius * c, pos + side * radius * s)) hits++;
+      if (hits >= SWING_ARC * angles.length) return true;
+    }
+  }
+  return false;
+}
+
+/** What a gap in a wall line is. A blank gap only counts between two pieces of the same wall. */
+function gapKind(ink: Mask, drawn: Mask, width: number, height: number, line: Line, from: number, to: number, cmPerPixel: number, collinear: boolean): Gap['kind'] | null {
+  const gapCm = (to - from) * cmPerPixel;
+  const doorSized = gapCm >= DOOR_CM[0] && gapCm <= DOOR_CM[1];
+  if (doorSized && swingArc(drawn, width, height, line.pos, from, to)) return 'door';
+  // Scattered ink only counts inside a wall; past a wall end it is as likely a room label.
+  const glazed = (collinear && gapInk(ink, width, line, from, to, height) >= WINDOW_INK) || glazingRun(drawn, width, height, line, from, to);
+  if (glazed) return gapCm >= WINDOW_CM[0] && gapCm <= WINDOW_CM[1] ? 'window' : null;
+  return collinear && doorSized ? 'blank' : null;
+}
+
 /** Joins collinear walls across gaps that read as doors or windows. */
-function joinOpenings(lines: Line[], crossing: Line[], ink: Mask, width: number, height: number, thickness: number, cmPerPixel: number): Line[] {
+function joinOpenings(lines: Line[], crossing: Line[], ink: Mask, drawn: Mask, width: number, height: number, cmPerPixel: number): Line[] {
   const sorted = [...lines].sort((p, q) => p.pos - q.pos || p.a - q.a);
   const groups: Line[][] = [];
   for (const line of sorted) {
@@ -175,19 +260,16 @@ function joinOpenings(lines: Line[], crossing: Line[], ink: Mask, width: number,
   const joined: Line[] = [];
   for (const group of groups) {
     group.sort((p, q) => p.a - q.a);
-    let current = group[0];
+    // Copies, so that later changes to a joined wall leave the raw lines as they were found.
+    let current: Line = { ...group[0], gaps: [...group[0].gaps] };
     for (const line of group.slice(1)) {
       const gap = line.a - current.b;
-      const blocked = crossing.some(c => c.pos > current.b + 1 && c.pos < line.a - 1 && line.pos >= c.a && line.pos <= c.b);
-      const gapCm = gap * cmPerPixel;
-      let kind: Gap['kind'] | 'solid' | null = null;
-      if (gap <= thickness * 1.5) kind = 'solid';
-      else if (!blocked) {
-        const filled = gapInk(ink, width, current, current.b, line.a, height) >= WINDOW_INK;
-        if (filled && gapCm >= WINDOW_CM[0] && gapCm <= WINDOW_CM[1]) kind = 'window';
-        else if (!filled && gapCm >= DOOR_CM[0] && gapCm <= DOOR_CM[1]) kind = 'door';
-      }
-      if (kind === null) { joined.push(current); current = line; continue; }
+      const blockers = crossing.filter(c => c.pos > current.b + 1 && c.pos < line.a - 1 && line.pos >= c.a && line.pos <= c.b);
+      // A wall that only pauses for the wall crossing it is one wall.
+      const solid = gap <= 1.5 * Math.max(current.thickness, line.thickness, ...blockers.map(c => c.thickness));
+      const kind = solid ? 'solid' : blockers.length ? null
+        : gapKind(ink, drawn, width, height, current, current.b, line.a, cmPerPixel, true);
+      if (kind === null) { joined.push(current); current = { ...line, gaps: [...line.gaps] }; continue; }
       const gaps = kind === 'solid' ? [] : [{ from: current.b, to: line.a, kind }];
       const lengthA = current.b - current.a, lengthB = line.b - line.a;
       current = {
@@ -201,14 +283,60 @@ function joinOpenings(lines: Line[], crossing: Line[], ink: Mask, width: number,
   return joined;
 }
 
+/**
+ * Settles the blank gaps. On a plan that draws door swings a blank gap is an open passage, so the
+ * wall is split there; on any other plan it is the only sign of a door.
+ */
+function settleBlanks(lines: Line[], passages: boolean): Line[] {
+  return lines.flatMap(line => {
+    if (!passages) return [{ ...line, gaps: line.gaps.map(gap => ({ ...gap, kind: gap.kind === 'window' ? 'window' as const : 'door' as const })) }];
+    const pieces: Line[] = [];
+    let a = line.a;
+    for (const cut of [...line.gaps.filter(gap => gap.kind === 'blank').sort((p, q) => p.from - q.from), null]) {
+      const b = cut ? cut.from : line.b;
+      pieces.push({ ...line, a, b, gaps: line.gaps.filter(gap => gap.kind !== 'blank' && gap.from >= a && gap.to <= b) });
+      if (cut) a = cut.to;
+    }
+    return pieces;
+  });
+}
+
+/**
+ * Carries a wall on to the wall it faces when the space between holds a door swing or glazing:
+ * a door hung in a corner, or a window that fills the wall up to the return.
+ */
+function openToCrossing(lines: Line[], crossing: Line[], ink: Mask, drawn: Mask, width: number, height: number, cmPerPixel: number) {
+  for (const line of lines) for (const end of ['a', 'b'] as const) {
+    const along = end === 'a' ? -1 : 1;
+    const tip = line[end];
+    let face = 0, distance = Infinity, facing: Line | null = null;
+    for (const other of crossing) {
+      if (line.pos < other.a - other.thickness || line.pos > other.b + other.thickness) continue;
+      const nearFace = other.pos - along * other.thickness / 2;
+      const away = (nearFace - tip) * along;
+      if (away > 0 && away < distance) { facing = other; face = nearFace; distance = away; }
+    }
+    // Shorter distances are an ordinary corner, which snapEnds closes.
+    if (!facing || distance <= 1.5 * Math.max(line.thickness, facing.thickness)) continue;
+    const from = Math.min(tip, face), to = Math.max(tip, face);
+    const inTheWay = lines.some(other => other !== line && other.b > from && other.a < to
+      && Math.abs(other.pos - line.pos) <= (other.thickness + line.thickness) / 2);
+    if (inTheWay) continue;
+    const kind = gapKind(ink, drawn, width, height, line, from, to, cmPerPixel, false);
+    if (!kind) continue;
+    line[end] = face;
+    line.gaps.push({ from, to, kind });
+  }
+}
+
 /** Moves wall ends onto the centre line of the wall they meet, so corners share exact points. */
-function snapEnds(lines: Line[], crossing: Line[], thickness: number) {
+function snapEnds(lines: Line[], crossing: Line[]) {
   const originals = lines.map(line => ({ a: line.a, b: line.b }));
   lines.forEach((line, index) => {
     for (const key of ['a', 'b'] as const) {
       let nearest: Line | null = null, distance = Infinity;
       for (const other of crossing) {
-        const reach = Math.max(thickness * 1.2, other.thickness, line.thickness);
+        const reach = Math.max(other.thickness, line.thickness) * 1.2;
         const gap = Math.abs(other.pos - originals[index][key]);
         if (gap <= reach && gap < distance && line.pos >= other.a - reach && line.pos <= other.b + reach) { nearest = other; distance = gap; }
       }
@@ -217,22 +345,50 @@ function snapEnds(lines: Line[], crossing: Line[], thickness: number) {
   });
 }
 
-function extract(working: Mask, ink: Mask, width: number, height: number, cmPerPixel: number): PlanDraft {
+function extract(working: Mask, ink: Mask, drawn: Mask, width: number, height: number, cmPerPixel: number): PlanDraft {
   const none: PlanDraft = { walls: [], openings: [], coverage: 0 };
-  const thickness = wallThickness(working, width, height, cmPerPixel);
-  if (!thickness) return none;
-  const radius = Math.max(1, Math.floor(thickness * 0.2));
-  const opened = dilate(erode(working, width, height, radius), width, height, radius);
-  const minLength = Math.max(2 * thickness + 1, MIN_LENGTH_CM / cmPerPixel);
-  const flipped = transpose(opened, width, height);
+  const low = Math.max(2, MIN_WALL_CM / cmPerPixel);
+  const thickest = wallThickness(working, width, height, low, MAX_WALL_CM / cmPerPixel);
+  if (!thickest) return none;
+  const rawHorizontal: Line[] = [], rawVertical: Line[] = [];
+  let opened: Mask = working, residual = working;
+  for (let pass = 0, thickness = thickest; pass < MAX_THICKNESS_CLASSES && thickness; pass++) {
+    const radius = Math.max(1, Math.floor(thickness * 0.2));
+    const cleaned = dilate(erode(residual, width, height, radius), width, height, radius);
+    if (pass === 0) opened = cleaned;
+    const minLength = Math.max(2 * thickness + 1, MIN_LENGTH_CM / cmPerPixel);
+    const found = [
+      bands(cleaned, width, height, minLength, thickness),
+      bands(transpose(cleaned, width, height), height, width, minLength, thickness),
+    ];
+    rawHorizontal.push(...found[0]); rawVertical.push(...found[1]);
+    // Walls already found are rubbed out, so the next class is read from what is left.
+    residual = Uint8Array.from(residual);
+    found.forEach((lines, vertical) => {
+      for (const line of lines) {
+        const half = line.thickness / 2 + 2;
+        for (let across = Math.max(0, Math.floor(line.pos - half)); across < Math.min(vertical ? width : height, line.pos + half); across++) {
+          for (let along = Math.max(0, line.a - 2); along < Math.min(vertical ? height : width, line.b + 2); along++) {
+            residual[vertical ? along * width + across : across * width + along] = 0;
+          }
+        }
+      }
+    });
+    const high = thickness * NEXT_CLASS_RATIO;
+    thickness = high >= low ? wallThickness(residual, width, height, low, high) : 0;
+  }
   const flippedInk = transpose(ink, width, height);
-  const rawHorizontal = bands(opened, width, height, minLength, thickness);
-  const rawVertical = bands(flipped, height, width, minLength, thickness);
-  const horizontal = joinOpenings(rawHorizontal, rawVertical, ink, width, height, thickness, cmPerPixel);
-  const vertical = joinOpenings(rawVertical, rawHorizontal, flippedInk, height, width, thickness, cmPerPixel);
+  const flippedDrawn = transpose(drawn, width, height);
+  let horizontal = joinOpenings(rawHorizontal, rawVertical, ink, drawn, width, height, cmPerPixel);
+  let vertical = joinOpenings(rawVertical, rawHorizontal, flippedInk, flippedDrawn, height, width, cmPerPixel);
+  openToCrossing(horizontal, rawVertical, ink, drawn, width, height, cmPerPixel);
+  openToCrossing(vertical, rawHorizontal, flippedInk, flippedDrawn, height, width, cmPerPixel);
+  const swings = [...horizontal, ...vertical].flatMap(line => line.gaps).filter(gap => gap.kind === 'door').length;
+  horizontal = settleBlanks(horizontal, swings >= SWINGS_FOR_PASSAGES);
+  vertical = settleBlanks(vertical, swings >= SWINGS_FOR_PASSAGES);
   // Each axis snaps against the other's unsnapped ranges plus reach, so order does not matter.
-  snapEnds(horizontal, vertical, thickness);
-  snapEnds(vertical, horizontal, thickness);
+  snapEnds(horizontal, vertical);
+  snapEnds(vertical, horizontal);
 
   const keep = (line: Line) => line.b > line.a && (line.linked || (line.b - line.a) * cmPerPixel >= ISOLATED_LENGTH_CM);
   const walls: DraftWall[] = [];
@@ -242,7 +398,7 @@ function extract(working: Mask, ink: Mask, width: number, height: number, cmPerP
     const point = (along: number): Point => isHorizontal ? { x: along, y: line.pos } : { x: line.pos, y: along };
     const wall = walls.push({ start: point(line.a), end: point(line.b), thickness: line.thickness }) - 1;
     for (const gap of line.gaps) {
-      openings.push({ wall, kind: gap.kind, center: ((gap.from + gap.to) / 2 - line.a) / (line.b - line.a), width: gap.to - gap.from });
+      openings.push({ wall, kind: gap.kind === 'window' ? 'window' : 'door', center: ((gap.from + gap.to) / 2 - line.a) / (line.b - line.a), width: gap.to - gap.from });
     }
     const half = line.thickness / 2 + 1;
     for (let along = Math.floor(line.a - half); along < line.b + half; along++) {
@@ -266,13 +422,14 @@ function extract(working: Mask, ink: Mask, width: number, height: number, cmPerP
 
 export function detectFloorPlan(raster: PlanRaster, cmPerPixel: number): PlanDraft {
   const { width, height } = raster;
-  const ink = inkMask(raster);
-  const solid = extract(ink, ink, width, height, cmPerPixel);
+  const { ink, gray } = inkMask(raster);
+  const drawn = drawnMask(gray, ink, width, height, MIN_WALL_CM / cmPerPixel / 2);
+  const solid = extract(ink, ink, drawn, width, height, cmPerPixel);
   if (solid.walls.length >= 4) return solid;
   // Plans drawn with outlined walls have no solid band until the two faces are closed together.
   const radius = Math.max(1, Math.round(MAX_HOLLOW_WALL_CM / cmPerPixel / 2));
   const closed = erode(dilate(ink, width, height, radius), width, height, radius);
-  const hollow = extract(closed, ink, width, height, cmPerPixel);
+  const hollow = extract(closed, ink, drawn, width, height, cmPerPixel);
   return hollow.walls.length > solid.walls.length ? hollow : solid;
 }
 
