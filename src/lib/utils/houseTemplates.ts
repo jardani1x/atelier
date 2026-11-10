@@ -334,7 +334,75 @@ function createLShaped(): Project {
   return makeProject('L-Shaped House', makeFloor(walls, doors, windows, fur));
 }
 
+/** Illustrative four-room layout at a typical size, not a copy of any published HDB plan. */
+function createFourRoomHdb(): Project {
+  const outer = 20, inner = 10, height = 260;
+  const chain = (points: [number, number][], thickness: number) =>
+    points.slice(1).map((point, index) => wall(points[index][0], points[index][1], point[0], point[1], thickness, height));
+
+  const north = chain([[0, 0], [330, 0], [660, 0], [1100, 0]], outer);
+  const east = chain([[1100, 0], [1100, 340], [1100, 520], [1100, 820]], outer);
+  const south = chain([[1100, 820], [900, 820], [660, 820], [0, 820]], outer);
+  const west = chain([[0, 820], [0, 340], [0, 0]], outer);
+  const corridor = chain([[0, 340], [330, 340], [660, 340], [780, 340], [940, 340], [1100, 340]], inner);
+  const kitchenNorth = chain([[660, 520], [780, 520], [900, 520], [940, 520], [1100, 520]], inner);
+  const bedroomDivider = wall(330, 0, 330, 340, inner, height);
+  const masterDivider = wall(660, 0, 660, 340, inner, height);
+  const commonBathWest = wall(780, 340, 780, 520, inner, height);
+  const bathDivider = wall(940, 340, 940, 520, inner, height);
+  const kitchenWest = wall(660, 520, 660, 820, inner, height);
+  const yardWall = wall(900, 520, 900, 820, inner, height);
+
+  const [topBed2, topBed3, topMaster] = north;
+  const [, eastMasterBath, eastYard] = east;
+  const [, southKitchen, southLiving] = south;
+  const [westLiving] = west;
+  const [doorBed2, doorBed3, doorMaster, , doorMasterBath] = corridor;
+
+  const walls = [
+    ...north, ...east, ...south, ...west, ...corridor, ...kitchenNorth,
+    bedroomDivider, masterDivider, commonBathWest, bathDivider, kitchenWest, yardWall,
+  ];
+  const doors = [
+    door(westLiving.id, 0.25, 'single', 100),
+    door(doorBed2.id, 0.75),
+    door(doorBed3.id, 0.75),
+    door(doorMaster.id, 0.5),
+    door(doorMasterBath.id, 0.5, 'single', 75),
+    door(commonBathWest.id, 0.5, 'single', 75),
+    door(kitchenWest.id, 0.25),
+    door(yardWall.id, 0.5, 'single', 80),
+  ];
+  const windows = [
+    win(topBed2.id, 0.5, 'standard', 150),
+    win(topBed3.id, 0.5, 'standard', 150),
+    win(topMaster.id, 0.5, 'standard', 180),
+    win(southLiving.id, 0.5, 'standard', 240),
+    win(southKitchen.id, 0.5, 'standard', 120),
+    win(eastMasterBath.id, 0.5, 'standard', 60),
+    win(eastYard.id, 0.5, 'standard', 150),
+  ];
+  const items = [
+    furniture('bed_queen', 880, 130),
+    furniture('bed_twin', 160, 130),
+    furniture('bed_twin', 490, 130),
+    furniture('sofa', 280, 680),
+    furniture('dining_table', 330, 460),
+    furniture('toilet', 860, 480),
+    furniture('toilet', 1020, 480),
+  ];
+  return makeProject('4-Room HDB Flat', makeFloor(walls, doors, windows, items));
+}
+
 export const houseTemplates: HouseTemplate[] = [
+  {
+    name: '4-Room HDB Flat',
+    description: 'Illustrative layout, not an official HDB plan: master with bathroom, 2 bedrooms, common bathroom, kitchen, service yard',
+    icon: '🏢',
+    area: '~90m²',
+    tags: ['singapore', 'hdb', 'apartment'],
+    create: createFourRoomHdb,
+  },
   {
     name: 'Studio Apartment',
     description: 'Open plan living/kitchen, bathroom, closet',

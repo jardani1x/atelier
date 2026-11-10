@@ -1,3 +1,5 @@
+import type { CabinetParams } from '$lib/utils/cabinetGeometry';
+
 export interface Point { x: number; y: number; }
 
 /** Shared item metadata. Null explicitly clears a retained native value. */
@@ -150,6 +152,22 @@ export interface Column {
   color: string;
 }
 
+/** A parametric built-in. Dimensions are cm; `position` is the footprint centre; the front faces local +y in plan. */
+export interface Cabinet extends CabinetParams {
+  id: string;
+  name?: string;
+  position: Point;
+  rotation: number;
+  color: string;
+  roughness: number;
+  metalness: number;
+  /** 0 to 1; absent means opaque. */
+  transmission?: number;
+  /** Height of the cabinet base above the floor in cm; absent means floor level. */
+  elevation?: number;
+  locked?: boolean;
+}
+
 export interface Measurement {
   id: string;
   x1: number;
@@ -212,6 +230,32 @@ export interface CustomEntourageDef {
   aspect: number; // height / width
 }
 
+export interface SolidVector {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** A polygon drawn on any plane and extruded along that plane's normal. Coordinates are 3D, in cm, relative to the floor. */
+export interface Solid {
+  id: string;
+  name?: string;
+  origin: SolidVector;
+  /** Unit in-plane axes; u x v is the extrusion direction. */
+  u: SolidVector;
+  v: SolidVector;
+  /** Counter-clockwise outline in (u, v) coordinates. */
+  profile: Point[];
+  depth: number;
+  /** The profile approximates a circle, so a side push changes the radius. */
+  curved?: boolean;
+  color: string;
+  roughness: number;
+  metalness: number;
+  transmission?: number;
+  locked?: boolean;
+}
+
 export interface Floor {
   id: string;
   name: string;
@@ -227,6 +271,8 @@ export interface Floor {
   furniture: FurnitureItem[];
   stairs: Stair[];
   columns: Column[];
+  cabinets?: Cabinet[];
+  solids?: Solid[];
   backgroundImage?: BackgroundImage;
   guides: GuideLine[];
   measurements: Measurement[];
@@ -268,7 +314,17 @@ export interface InterchangeState {
   planNotes?: string;
 }
 
+/** A named camera position in the 3D view, in scene centimetres. */
+export interface SavedView {
+  id: string;
+  name: string;
+  position: SolidVector;
+  target: SolidVector;
+  floorId?: string;
+}
+
 export interface Project {
+  savedViews?: SavedView[];
   customModels?: CustomModelDef[];
   attachmentNames?: Record<string, string>;
   projectPackage?: ProjectPackageState;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CABINET_FINISHES, CABINET_FINISH_IDS, matchCabinetFinish, type CabinetFinishId } from "$lib/utils/cabinetFinishes";
   import { wallMaterialLabels } from '$lib/i18n/wallMaterialLabels';
   import { entourageLabels } from '$lib/i18n/entourageLabels';
   import { roomTypeLabels, roomColorLabels, floorGroupLabels, floorMaterialLabels } from '$lib/i18n/roomPropertyLabels';
@@ -12,7 +13,7 @@
   import type { DetailTarget } from '$lib/models/types';
   import { catalogAssetUrl } from '$lib/utils/catalogAssetUrl';
 
-  import { currentProject, activeFloor, selectedElementId, selectedRoomId, updateWall, resizeWallLength, reverseWall, updateDoor, updateWindow, updateRoom, updateFurniture, detectedRoomsStore, updateStair, updateColumn, updateBackgroundImage, setBackgroundImage, calibrationMode, calibrationPoints, doorJoinMode, updateTextAnnotation, toggleFurnitureLock, updateEntourageItem, removeElement, elevationWallId } from '$lib/stores/project';
+  import { currentProject, activeFloor, selectedElementId, selectedRoomId, updateWall, resizeWallLength, reverseWall, updateDoor, updateWindow, updateRoom, updateFurniture, detectedRoomsStore, updateStair, updateColumn, updateCabinet, updateSolid, updateBackgroundImage, setBackgroundImage, calibrationMode, calibrationPoints, doorJoinMode, updateTextAnnotation, toggleFurnitureLock, updateEntourageItem, removeElement, elevationWallId } from '$lib/stores/project';
   import { wallLength as calcWallLength, MIN_WALL_LENGTH, type WallEndpoint } from '$lib/utils/wallEditing';
   import { openingOnWall } from '$lib/utils/wallProfiles';
   import { getEntourageDef } from '$lib/utils/entourageCatalog';
@@ -53,6 +54,8 @@
   let selectedFurniture = $derived(floor?.furniture?.find(f => f.id === selId) ?? null);
   let selectedStair = $derived(floor?.stairs?.find(s => s.id === selId) ?? null);
   let selectedColumn = $derived(floor?.columns?.find(c => c.id === selId) ?? null);
+  let selectedCabinet = $derived(floor?.cabinets?.find(c => c.id === selId) ?? null);
+  let selectedSolid = $derived(floor?.solids?.find(s => s.id === selId) ?? null);
   let selectedTextAnnotation = $derived(floor?.textAnnotations?.find(t => t.id === selId) ?? null);
   let selectedEntourage = $derived(floor?.entourage?.find(en => en.id === selId) ?? null);
   let hasBgImage = $derived(!!floor?.backgroundImage);
@@ -360,7 +363,7 @@
     { label: '🧶 Carpet', ids: ['carpet-beige', 'carpet-gray'] },
   ];
 
-  let hasSelection = $derived(!!selectedWall || !!selectedDoor || !!selectedWindow || !!selectedFurniture || !!selectedRoom || !!selectedStair || !!selectedColumn || !!selectedTextAnnotation || !!selectedEntourage || (!is3D && hasBgImage));
+  let hasSelection = $derived(!!selectedWall || !!selectedDoor || !!selectedWindow || !!selectedFurniture || !!selectedRoom || !!selectedStair || !!selectedColumn || !!selectedCabinet || !!selectedSolid || !!selectedTextAnnotation || !!selectedEntourage || (!is3D && hasBgImage));
 </script>
 
 <!-- Right sidebar on md+; slides up as a bottom sheet on phones -->
@@ -983,6 +986,92 @@
           <input type="number" value={selectedColumn.rotation} oninput={(e) => scalarInput(e, selectedColumn!.rotation, value => updateColumn(selectedColumn!.id, { rotation: value }))} onblur={(e) => scalarInput(e, selectedColumn!.rotation, value => updateColumn(selectedColumn!.id, { rotation: value }))} step="any" class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
         </label>
       {/if}
+    </div>
+  {:else if selectedCabinet}
+    {@const cabinet = selectedCabinet}
+    <div class="space-y-3" data-testid="cabinet-properties">
+      <h3 class="text-sm font-semibold text-gray-700 mb-3">{cabinet.name ?? $t('cabinetProperties.heading')}</h3>
+      {#each [['width', $t('cabinetProperties.width')], ['height', $t('cabinetProperties.height')], ['depth', $t('cabinetProperties.depth')], ['thickness', $t('cabinetProperties.thickness')]] as [key, label]}
+        {@const field = key as 'width' | 'height' | 'depth' | 'thickness'}
+        <label class="block">
+          <span class="text-xs text-gray-500">{label} ({unitLabel()})</span>
+          <input type="number" value={displayValue(cabinet[field])} min="0" step="any" oninput={(e) => dimensionInput(e, cabinet[field], value => updateCabinet(cabinet.id, { [field]: value }))} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+        </label>
+      {/each}
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.elevation')} ({unitLabel()})</span>
+        <input type="number" value={displayValue(cabinet.elevation ?? 0)} min="0" step="any" oninput={(e) => dimensionInput(e, cabinet.elevation ?? 0, value => updateCabinet(cabinet.id, { elevation: value }))} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.compartments')}</span>
+        <input type="number" value={cabinet.compartments} min="1" max="12" step="1" oninput={(e) => scalarInput(e, cabinet.compartments, value => updateCabinet(cabinet.id, { compartments: Math.round(value) }))} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.shelves')}</span>
+        <input type="text" value={cabinet.shelves.map(s => Math.round(s * 100)).join(', ')} onchange={(e) => updateCabinet(cabinet.id, { shelves: (e.target as HTMLInputElement).value.split(',').map(v => Number(v) / 100).filter(v => v > 0 && v < 1) })} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.doors')}</span>
+        <select value={cabinet.doors} onchange={(e) => updateCabinet(cabinet.id, { doors: (e.target as HTMLSelectElement).value as 'none' | 'hinged' | 'sliding' })} class="w-full px-2 py-1 border border-gray-200 rounded text-sm">
+          <option value="none">{$t('cabinetProperties.doorNone')}</option>
+          <option value="hinged">{$t('cabinetProperties.doorHinged')}</option>
+          <option value="sliding">{$t('cabinetProperties.doorSliding')}</option>
+        </select>
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.material')}</span>
+        <select data-testid="cabinet-material" value={matchCabinetFinish(cabinet)} onchange={(e) => { const id = (e.target as HTMLSelectElement).value as CabinetFinishId | ''; if (id) updateCabinet(cabinet.id, { ...CABINET_FINISHES[id] }); }} class="w-full px-2 py-1 border border-gray-200 rounded text-sm">
+          <option value="" disabled>{$t('cabinetFinishes.custom')}</option>
+          {#each CABINET_FINISH_IDS as id}
+            <option value={id}>{$t(`cabinetFinishes.${id}`)}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="flex items-center justify-between">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.finish')}</span>
+        <input type="color" value={cabinet.color} oninput={(e) => updateCabinet(cabinet.id, { color: (e.target as HTMLInputElement).value })} class="w-8 h-6 rounded border border-gray-200 cursor-pointer" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.roughness')}</span>
+        <input type="range" value={cabinet.roughness} min="0" max="1" step="0.01" oninput={(e) => updateCabinet(cabinet.id, { roughness: Number((e.target as HTMLInputElement).value) })} class="w-full" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.rotation')}</span>
+        <input type="number" value={cabinet.rotation} step="any" oninput={(e) => scalarInput(e, cabinet.rotation, value => updateCabinet(cabinet.id, { rotation: value }))} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+      </label>
+    </div>
+  {:else if selectedSolid}
+    {@const solid = selectedSolid}
+    <div class="space-y-3" data-testid="solid-properties">
+      <h3 class="text-sm font-semibold text-gray-700 mb-3">{$t('solidProperties.title')}</h3>
+      {#each [['x', $t('solidProperties.originX')], ['y', $t('solidProperties.originY')], ['z', $t('solidProperties.originZ')]] as [key, label]}
+        {@const axis = key as 'x' | 'y' | 'z'}
+        <label class="block">
+          <span class="text-xs text-gray-500">{label} ({unitLabel()})</span>
+          <input type="number" value={displayValue(solid.origin[axis])} step="any" oninput={(e) => { const input = e.target as HTMLInputElement; const value = inputToCm(input.valueAsNumber); if (input.value.trim() && Number.isFinite(value)) updateSolid(solid.id, { origin: { ...solid.origin, [axis]: value } }); }} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+        </label>
+      {/each}
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('solidProperties.depth')} ({unitLabel()})</span>
+        <input data-testid="solid-depth" type="number" value={displayValue(solid.depth)} min="0" step="any" oninput={(e) => dimensionInput(e, solid.depth, value => updateSolid(solid.id, { depth: value }))} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.material')}</span>
+        <select data-testid="solid-material" value={matchCabinetFinish(solid)} onchange={(e) => { const id = (e.target as HTMLSelectElement).value as CabinetFinishId | ''; if (id) updateSolid(solid.id, { ...CABINET_FINISHES[id] }); }} class="w-full px-2 py-1 border border-gray-200 rounded text-sm">
+          <option value="" disabled>{$t('cabinetFinishes.custom')}</option>
+          {#each CABINET_FINISH_IDS as id}
+            <option value={id}>{$t(`cabinetFinishes.${id}`)}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="flex items-center justify-between">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.finish')}</span>
+        <input type="color" value={solid.color} oninput={(e) => updateSolid(solid.id, { color: (e.target as HTMLInputElement).value })} class="w-8 h-6 rounded border border-gray-200 cursor-pointer" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">{$t('cabinetProperties.roughness')}</span>
+        <input type="range" value={solid.roughness} min="0" max="1" step="0.01" oninput={(e) => updateSolid(solid.id, { roughness: Number((e.target as HTMLInputElement).value) })} class="w-full" />
+      </label>
     </div>
   {:else if selectedTextAnnotation}
     <div class="space-y-3">

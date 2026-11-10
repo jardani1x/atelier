@@ -13,6 +13,7 @@
   import LibraryRestoreDialog from '$lib/components/LibraryRestoreDialog.svelte';
   import ProjectPackageDialog from '$lib/components/ProjectPackageDialog.svelte';
   import LibraryStorageNote from '$lib/components/LibraryStorageNote.svelte';
+  import CloudPanel from '$lib/components/CloudPanel.svelte';
   import ProjectActionsMenu from '$lib/components/ProjectActionsMenu.svelte';
   import { houseTemplates } from '$lib/utils/houseTemplates';
 
@@ -210,6 +211,7 @@
       </div>
     </div>
     <LibraryStorageNote active={projects.length > 0 && !libraryError} />
+    <CloudPanel />
     {#if libraryError}
       <div role="alert" bind:this={libraryAlert} class="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
         <p>{projectServiceMessage(libraryError, $locale)}</p>

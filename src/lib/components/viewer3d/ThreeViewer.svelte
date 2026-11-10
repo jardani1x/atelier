@@ -1,11 +1,14 @@
 <script lang="ts">
+  import type { SceneView } from "$lib/utils/frameScene";
   import { t, locale, type TranslationKey } from '$lib/i18n';
   import { furnitureName } from '$lib/i18n/furnitureNames';
   import { catalogCategoryLabels } from '$lib/i18n/catalogCategories';
   import { aiRenderLabels } from '$lib/i18n/aiRenderLabels';
   import { aiRenderMessages } from '$lib/i18n/aiRenderMessages';
   import { hasOpenModal } from '$lib/utils/modalDialog';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { renderModeEnabled, renderSettings, renderTraceKey, renderOutputPixelRatio, RENDER_QUALITY, type RenderQuality, type RenderLighting, type RenderOutput } from '$lib/utils/renderSettings';
+  import { createLightingEnvironment, LIGHTING_PRESETS } from '$lib/utils/renderEnvironment';
   import { get } from 'svelte/store';
   import { openAISettings, setOpenAIModel } from '$lib/stores/aiKeys';
   import { generateOpenAIRenderImage, validateOpenAIConfig, getEffectiveModel, normalizeBaseUrl } from '$lib/utils/openaiClient';
@@ -15,7 +18,7 @@
   import type { Floor, Wall, Door, Window as Win, Stair } from '$lib/models/types';
   import { getWallStartHeight, getWallEndHeight } from '$lib/models/types';
   import { wallColors, type WallColor } from '$lib/utils/materials';
-  import { projectSettings, formatArea } from '$lib/stores/settings';
+  import { projectSettings, formatArea, formatLengthPrecise } from '$lib/stores/settings';
   import * as THREE from 'three';
   import { createRoomSlabGeometry } from '$lib/utils/roomSlabGeometry';
   import { roomHoles } from '$lib/utils/roomNesting';
@@ -29,6 +32,8 @@
   import { sceneSignature } from '$lib/utils/sceneSignature';
   import { framingContext, shouldFrameScene, type FramingContext } from '$lib/utils/sceneFraming';
   import { WalkthroughMotion } from '$lib/utils/walkthroughMotion';
+  import { buildWalkObstacles, resolveWalkCollision, type WalkObstacle } from '$lib/utils/walkCollision';
+  import { facesToEquirect, injectPanoramaXmp, PANORAMA_FACES } from '$lib/utils/panorama';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
   import { getCatalogItem, furnitureCatalog, furnitureCategories } from '$lib/utils/furnitureCatalog';
@@ -38,7 +43,16 @@
   import { disposeModel } from '$lib/utils/furnitureModelResources';
   import { ownColorCanvasTexture, refreshBackgroundTexture } from '$lib/utils/viewerTextures';
   import { createFurnitureModelWithGLB, createPlacedFurnitureModel } from '$lib/utils/furnitureModelLoader';
-  import { addFurniture } from '$lib/stores/project';
+  import { createCabinetModel } from '$lib/utils/cabinetModel3d';
+  import { createSolidModel } from '$lib/utils/solidModel3d';
+  import { validSolid } from '$lib/utils/solids';
+  import { createModelingTools, pickElementId, type ModelTool, type ModelToolError, type ModelingTools } from '$lib/utils/modelingTools';
+  import { TILE_SIZE_CM, compensatedRoughness, createPbrSet, type PbrSet } from '$lib/utils/pbrMaps';
+  import { createPathTrace, type PathTrace } from '$lib/utils/progressiveRender';
+  import { addFurniture, addSavedView, addSolid, applyPushPull, deleteSavedView, renameSavedView, setActiveFloor } from '$lib/stores/project';
+  import { tourDurationMs, tourPose, type ViewPose } from '$lib/utils/savedViews';
+  import type { createViewportEffects, ViewCamera, ViewportEffects } from '$lib/utils/viewportEffects';
+  import type { SavedView } from '$lib/models/types';
   import { detectRooms, resolveRoomGeometry, getRoomPolygon, roomCentroid, roomLabelPosition } from '$lib/utils/roomDetection';
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
@@ -69,6 +83,116 @@
     sceneDirty = true;
     requestRender();
   }
+
+  let pathTrace: PathTrace | null = null;
+  let pathTraceRun = 0;
+  let pathTraceState = $state<'off' | 'starting' | 'on'>('off');
+  let pathTraceTarget = $state(Infinity);
+  let pathTraceKey = '';
+  let pathTraceDisplayDirty = false;
+  let renderSamples = $state(0);
+  let renderError = $state(false);
+
+  // Render mode shares this viewer: toggling it starts or stops tracing, and only quality or
+  // lighting changes restart accumulation. Exposure is applied when the image is displayed.
+  $effect(() => {
+    const enabled = $renderModeEnabled;
+    const settings = $renderSettings;
+    untrack(() => {
+      if (!renderer || renderedSignature === null) return;
+      renderer.toneMappingExposure = enabled ? settings.exposure : 1.2;
+      pathTrace?.setDenoise(settings.denoise);
+      if (enabled && (pathTraceState === 'off' || pathTraceKey !== renderTraceKey(settings))) void startPathTrace();
+      else if (!enabled && pathTraceKey) { pathTraceKey = ''; stopPathTrace(); }
+      else if (pathTrace) { pathTraceDisplayDirty = true; requestRender(); }
+    });
+  });
+  $effect(() => () => renderModeEnabled.set(false));
+
+  function releasePathTrace() {
+    pathTraceRun++;
+    pathTrace?.dispose();
+    pathTrace = null;
+  }
+
+  /** Render mode can draw larger than the screen. The canvas keeps its CSS size; only the drawing buffer grows. */
+  function applyOutputResolution() {
+    if (!renderer || !container) return;
+    const ratio = renderOutputPixelRatio($renderModeEnabled ? $renderSettings.output : 'viewport',
+      container.clientWidth, container.clientHeight, window.devicePixelRatio, renderer.capabilities.maxTextureSize);
+    if (renderer.getPixelRatio() !== ratio) renderer.setPixelRatio(ratio);
+  }
+
+  function stopPathTrace() {
+    releasePathTrace();
+    pathTraceState = 'off';
+    if (renderer) {
+      delete renderer.domElement.dataset.traceSamples;
+      delete renderer.domElement.dataset.traceCabinetPanels;
+      delete renderer.domElement.dataset.traceInteriorLights;
+      applyOutputResolution();
+    }
+    markSceneDirty();
+  }
+
+  async function startPathTrace() {
+    releasePathTrace();
+    setOrthographic(false);
+    const run = pathTraceRun;
+    pathTraceState = 'starting';
+    delete renderer.domElement.dataset.traceError;
+    delete renderer.domElement.dataset.traceSamples;
+    try {
+      const settings = $renderModeEnabled ? $renderSettings : null;
+      if (settings) renderer.toneMappingExposure = settings.exposure;
+      const quality = settings ? RENDER_QUALITY[settings.quality] : null;
+      applyOutputResolution();
+      const trace = await createPathTrace(renderer, scene, camera, new Set([sceneGround]), settings && quality ? {
+        ...quality,
+        // A requested image size is exact, so the preview downscale does not apply.
+        renderScale: settings.output === 'viewport' ? quality.renderScale : 1,
+        environment: createLightingEnvironment(settings.lighting),
+        interiorLight: LIGHTING_PRESETS[settings.lighting].interiorLight || settings.ceilingLights,
+        lightTemperature: settings.lightTemperature,
+        lightIntensity: settings.lightIntensity,
+        denoise: settings.denoise,
+      } : {});
+      if (run !== pathTraceRun) { trace.dispose(); return; }
+      pathTrace = trace;
+      pathTraceTarget = quality?.targetSamples ?? Infinity;
+      pathTraceKey = settings ? renderTraceKey(settings) : '';
+      renderer.domElement.dataset.traceKey = pathTraceKey;
+      renderError = false;
+      pathTraceState = 'on';
+      renderer.domElement.dataset.traceCabinetPanels = String(trace.cabinetPanels);
+      renderer.domElement.dataset.traceInteriorLights = String(trace.interiorLights);
+      requestRender();
+    } catch (error) {
+      if (run !== pathTraceRun) return;
+      console.error('Path trace failed to start', error instanceof Error ? error.stack : error);
+      renderer.domElement.dataset.traceError = error instanceof Error ? error.message : String(error);
+      renderError = true;
+      stopPathTrace();
+    }
+  }
+
+  async function exportModel(format: 'glb' | 'obj') {
+    try {
+      const { buildExportRoot, modelToGLB, modelToOBJ, downloadModel } = await import('$lib/utils/modelExport');
+      const root = buildExportRoot(scene, new Set([sceneGround]));
+      if (format === 'glb') downloadModel(await modelToGLB(root), 'atelier-model.glb', 'model/gltf-binary');
+      else downloadModel(modelToOBJ(root), 'atelier-model.obj', 'text/plain');
+      delete renderer.domElement.dataset.exportError;
+    } catch (error) {
+      console.error('3D export failed', error);
+      renderer.domElement.dataset.exportError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function togglePathTrace() {
+    if (pathTraceState === 'off') void startPathTrace();
+    else stopPathTrace();
+  }
   let pointerControls: PointerLockControls;
   let currentFloor = $state.raw<Floor | null>(null);
   let renderedSignature: string | null = null;
@@ -88,6 +212,35 @@
   let wallsTransparent = $state(false);
   // Multi-floor stacking
   let showAllFloors = $state(false);
+  let modelingTools: ModelingTools | null = null;
+  let modelTool = $state<ModelTool>('select');
+  let modelToolActive = $state(false);
+  let modelReadout = $state<number | null>(null);
+  let modelError = $state<ModelToolError | null>(null);
+  let modelInput = $state('');
+  let modelInputEl = $state<HTMLInputElement | null>(null);
+  const MODEL_TOOLS: ModelTool[] = ['select', 'rectangle', 'circle', 'polygon', 'pushpull'];
+
+  function chooseModelTool(tool: ModelTool) {
+    if (tool !== 'select') {
+      furniturePlacementMode = false;
+      furniturePickerOpen = false;
+      selectedCatalogId = null;
+      removeGhostPreview();
+    }
+    modelInput = '';
+    modelingTools?.setTool(tool);
+    if (tool !== 'select') queueMicrotask(() => modelInputEl?.focus());
+  }
+
+  function submitModelInput(event: SubmitEvent) {
+    event.preventDefault();
+    if (modelingTools?.submit(modelInput)) modelInput = '';
+  }
+
+  $effect(() => {
+    if (!editMode || showAllFloors || walkthroughMode) modelingTools?.setTool('select');
+  });
   let activeFloorElevation = $state(0);
   let sceneGround: THREE.Mesh;
   // Stacked geometry uses the same floor levels as the 2D reference layer.
@@ -98,6 +251,12 @@
   const walkthroughMotion = new WalkthroughMotion();
   let moveSpeed = $state(800);
   let sprintSpeed = $state(1600);
+  let walkCollision = $state(true);
+  let panoramaBusy = $state(false);
+  let panoramaFailed = $state(false);
+  let walkObstacles: WalkObstacle[] = [];
+  let walkObstacleFloor: Floor | null = null;
+  let walkObstacleEye = 0;
   let eyeHeight = $state(160); // cm
 
   // Lighting controls state
@@ -645,6 +804,7 @@
     if (hasOpenModal()) return;
     // ESC exits edit mode
     if (event.code === 'Escape' && editMode && !walkthroughMode) {
+      if (modelingTools?.cancel()) { modelInput = ''; return; }
       if (furniturePlacementMode) {
         furniturePlacementMode = false;
         furniturePickerOpen = false;
@@ -660,6 +820,12 @@
     if (event.code === 'Escape') { exitWalkthroughMode(); return; }
     if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
       || isWalkthroughField(event.target)) return;
+    if (walkthroughMode && !event.repeat && (event.code === 'KeyC' || event.code === 'KeyP')) {
+      event.preventDefault();
+      if (event.code === 'KeyC') toggleWalkCollision();
+      else void savePanorama();
+      return;
+    }
     if (walkthroughMotion.setKey(event.code, true, event.repeat)) {
       event.preventDefault();
       wakeWalkthrough();
@@ -793,7 +959,7 @@
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.target.set(0, 100, 0);
-    controls.maxPolarAngle = Math.PI / 2.05;
+    controls.maxPolarAngle = ORBIT_MAX_POLAR;
     // Mark dirty when orbit controls move the camera
     controls.addEventListener('change', markSceneDirty);
 
@@ -813,7 +979,7 @@
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(mouse, camera);
+      raycaster.setFromCamera(mouse, viewCamera());
 
       // Camera placement mode: first click = position, second click = look-at target
       if (cameraPlacementMode) {
@@ -854,7 +1020,7 @@
 
       // Furniture placement mode: place on floor
       if (furniturePlacementMode && selectedCatalogId) {
-        raycaster.setFromCamera(mouse, camera);
+        raycaster.setFromCamera(mouse, viewCamera());
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
           // Convert 3D (x, z) to 2D (x, y)
@@ -865,15 +1031,13 @@
         return;
       }
 
-      const intersects = raycaster.intersectObjects(wallGroup.children, false);
-      let hitWallId: string | null = null;
-      for (const hit of intersects) {
-        if (hit.object.userData.wallId) {
-          hitWallId = hit.object.userData.wallId;
-          break;
-        }
+      if (modelingTools && modelingTools.tool !== 'select') {
+        modelingTools.click(mouse);
+        modelInputEl?.focus();
+        return;
       }
-      selectedElementId.set(hitWallId);
+
+      selectedElementId.set(pickElementId(raycaster, wallGroup));
     });
 
     // Hover highlight in edit mode
@@ -884,7 +1048,7 @@
         const rect = renderer.domElement.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-        raycaster.setFromCamera(mouse, camera);
+        raycaster.setFromCamera(mouse, viewCamera());
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
           if (!ghostGroup) {
@@ -913,7 +1077,12 @@
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(mouse, camera);
+      raycaster.setFromCamera(mouse, viewCamera());
+      if (modelingTools && modelingTools.tool !== 'select') {
+        renderer.domElement.style.cursor = 'crosshair';
+        if (e.buttons === 0) modelingTools.pointerMove(mouse);
+        return;
+      }
       const intersects = raycaster.intersectObjects(wallGroup.children, false);
       const hit = intersects.find(i => i.object.userData.wallId);
       if (hit && hit.object !== hoveredMesh) {
@@ -923,6 +1092,23 @@
         hoveredMesh = null;
         renderer.domElement.style.cursor = editMode ? 'crosshair' : '';
       }
+    });
+
+    modelingTools = createModelingTools({
+      camera: () => camera,
+      root: () => wallGroup,
+      scene: () => scene,
+      floor: () => get(activeFloor) ?? null,
+      units: () => get(projectSettings).units,
+      invalidate: markSceneDirty,
+      addSolid,
+      applyPushPull,
+      onState: (state) => {
+        modelTool = state.tool;
+        modelToolActive = state.active;
+        modelReadout = state.readout;
+        modelError = state.error;
+      },
     });
 
     // Initialize PointerLock controls for walkthrough mode
@@ -980,6 +1166,7 @@
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.y = 0.5;
     floorMesh.receiveShadow = true;
+    floorMesh.userData.renderExclude = true; // 40 m placeholder; real room floors are part of the model.
     scene.add(floorMesh);
 
     wallGroup = new THREE.Group();
@@ -1011,22 +1198,23 @@
     controls.update();
   }
 
-  /** Generate a wall texture. Wall UVs already count 200 cm tiles (mapWallUVs), so it sets no repeat. */
-  function generateWallTexture(textureId: string, color: string): THREE.CanvasTexture {
+  /** Material fields for a textured wall. Wall UVs already count 200 cm tiles (mapWallUVs), so it sets no repeat. */
+  function wallSurface(textureId: string, color: string): THREE.MeshStandardMaterialParameters {
     const canvas = getWallTextureCanvas(textureId, color);
-    if (!canvas) {
-      const c = document.createElement('canvas');
-      c.width = 64; c.height = 64;
-      const cx = c.getContext('2d')!;
-      cx.fillStyle = color;
-      cx.fillRect(0, 0, 64, 64);
-      const tex = ownColorCanvasTexture(c);
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      return tex;
-    }
-    const tex = ownColorCanvasTexture(canvas);
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    return tex;
+    if (canvas) return { ...createPbrSet(canvas), roughness: compensatedRoughness(0.85) };
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    const cx = c.getContext('2d')!;
+    cx.fillStyle = color;
+    cx.fillRect(0, 0, 64, 64);
+    const map = ownColorCanvasTexture(c);
+    map.wrapS = map.wrapT = THREE.RepeatWrapping;
+    return { map, roughness: 0.85 };
+  }
+
+  function cabinetPbrSet(textureId: string): PbrSet | null {
+    const canvas = getFloorTextureCanvas(textureId);
+    return canvas ? createPbrSet(canvas) : null;
   }
 
   function buildStraightStairRun(group: THREE.Group, mat: THREE.MeshStandardMaterial, sideMat: THREE.MeshStandardMaterial, width: number, depth: number, riserCount: number, riserHeight: number, offsetX: number, offsetY: number, offsetZ: number) {
@@ -1170,6 +1358,11 @@
     }
   }
 
+  function buildCabinets(floor: Floor) {
+    for (const cabinet of floor.cabinets ?? []) wallGroup.add(createCabinetModel(cabinet, cabinetPbrSet));
+    for (const solid of floor.solids ?? []) if (validSolid(solid)) wallGroup.add(createSolidModel(solid, cabinetPbrSet));
+  }
+
   function clearGroup(group: THREE.Object3D) {
     disposeModel(group);
     group.clear();
@@ -1211,8 +1404,7 @@
       function resolveWallMat(color: string | undefined, texture: string | undefined, fallback: THREE.MeshStandardMaterial, isInterior: boolean = false): THREE.MeshStandardMaterial {
         const polyOff = isInterior ? { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 } : {};
         if (texture) {
-          const tex = generateWallTexture(texture, color || '#888888');
-          return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, ...polyOff });
+          return new THREE.MeshStandardMaterial({ ...wallSurface(texture, color || '#888888'), ...polyOff });
         }
         if (color && !DEFAULT_2D_COLORS.includes(color.toLowerCase())) {
           return new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.9, ...polyOff });
@@ -1235,8 +1427,7 @@
       if (extTex || wall.exteriorColor) {
         exteriorMat = resolveWallMat(wall.exteriorColor, extTex, defaultExteriorMat);
       } else if (wall.texture) {
-        const extTex = generateWallTexture(wall.texture, wall.color || '#888888');
-        exteriorMat = new THREE.MeshStandardMaterial({ map: extTex, roughness: 0.85 });
+        exteriorMat = new THREE.MeshStandardMaterial(wallSurface(wall.texture, wall.color || '#888888'));
       } else if (wall.color && !DEFAULT_2D_COLORS.includes(wall.color.toLowerCase())) {
         const c = new THREE.Color(wall.color).offsetHSL(0, -0.05, -0.1);
         exteriorMat = new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 });
@@ -1531,14 +1722,12 @@
         const floorMat = getMaterial(room.floorTexture);
         const floorCanvas = getFloorTextureCanvas(room.floorTexture);
         if (floorCanvas) {
-          const tex = ownColorCanvasTexture(floorCanvas);
-          tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-          // Tile every 200cm — now UVs are 0-1, so repeat = room size / tile size
-          const tileSizeCm = 200;
-          tex.repeat.set(roomW / tileSizeCm, roomH / tileSizeCm);
+          const pbr = createPbrSet(floorCanvas);
+          // UVs are 0-1 across the room, so repeat = room size / tile size. Each map needs it.
+          for (const tex of [pbr.map, pbr.normalMap, pbr.roughnessMap]) tex.repeat.set(roomW / TILE_SIZE_CM, roomH / TILE_SIZE_CM);
           material = new THREE.MeshStandardMaterial({
-            map: tex,
-            roughness: floorMat.roughness ?? 0.8,
+            ...pbr,
+            roughness: compensatedRoughness(floorMat.roughness ?? 0.8),
             transparent: false,
             opacity: 1.0
           });
@@ -1604,6 +1793,7 @@
         const ceilGeo = new THREE.ShapeGeometry(shape);
         const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
         ceilMesh.userData.renderExclude = true;
+        ceilMesh.userData.ceilingOutline = poly.map(p => ({ x: p.x, y: p.y }));
         ceilMesh.userData.xray = true;
         ceilMesh.rotation.x = -Math.PI / 2;
         ceilMesh.position.y = ceilingHeight;
@@ -1617,6 +1807,7 @@
 
     // Columns
     buildColumns(floor);
+    buildCabinets(floor);
 
     applyWallTransparency();
   }
@@ -1784,6 +1975,7 @@
     }
     markSceneDirty();
     renderedSignature = signature;
+    if (pathTraceState !== 'off' || $renderModeEnabled) void startPathTrace();
   }
 
   function applyWallTransparency() {
@@ -1806,7 +1998,9 @@
     markSceneDirty();
   }
 
-  function viewTopDown() {
+  function viewTopDown() { applySceneView('top-down'); }
+
+  function applySceneView(view: SceneView) {
     if (walkthroughMode) exitWalkthroughMode();
     // Consume pending orbit/pan deltas before setting the requested view. This
     // public update path clears damping without reaching into control internals.
@@ -1814,8 +2008,11 @@
     controls.enableDamping = false;
     controls.update();
     controls.enableDamping = damping;
+    controls.maxPolarAngle = ORBIT_MAX_POLAR;
     frameScene(camera, new THREE.Box3().setFromObject(wallGroup), controls.target,
-      { view: 'top-down', verticalInset: Math.min(64 / container.clientHeight, 0.2) });
+      { view, verticalInset: Math.min(64 / container.clientHeight, 0.2) });
+    renderer.domElement.dataset.sceneView = view;
+    if (orthographic) syncOrthoFromPerspective();
     controls.update();
     markSceneDirty();
   }
@@ -1829,6 +2026,7 @@
   }
 
   function enterWalkthroughMode() {
+    setOrthographic(false);
     cancelAIRender();
     cameraPlacementMode = false;
     cameraPreviewOpen = false;
@@ -1898,10 +2096,11 @@
     if (walkthroughMode) {
       lastOrbitFrame = undefined;
       const moving = walkthroughMotion.active;
-      walkthroughMotion.advance(timestamp, camera, { moveSpeed, sprintSpeed, eyeHeight, floorElevation: activeFloorElevation });
+      walkthroughMotion.advance(timestamp, camera, { moveSpeed, sprintSpeed, eyeHeight, floorElevation: activeFloorElevation, collide: walkCollider() });
+      renderer.domElement.dataset.walkPosition = `${camera.position.x.toFixed(1)},${camera.position.z.toFixed(1)}`;
       if (sceneDirty || moving) {
         sceneDirty = false;
-        renderer.render(scene, camera);
+        renderView(camera);
         renderer.domElement.dataset.rendered = 'true';
       }
       if (walkthroughMotion.active) requestRender();
@@ -1911,9 +2110,20 @@
       // leave no callback queued until an interaction or scene update wakes us.
       updateOrbitDamping(controls, lastOrbitFrame === undefined ? 1 / 60 : (timestamp - lastOrbitFrame) / 1000);
       lastOrbitFrame = animId === undefined ? undefined : timestamp;
-      if (sceneDirty) {
+      if (pathTrace) {
+        camera.updateMatrixWorld();
+        if (pathTrace.viewChangedRoomState()) void startPathTrace();
+        else if (pathTrace.samples < pathTraceTarget || pathTraceDisplayDirty || pathTrace.cameraMoved()) {
+          pathTraceDisplayDirty = false;
+          pathTrace.renderSample();
+          renderSamples = Math.floor(pathTrace.samples);
+          renderer.domElement.dataset.traceSamples = String(pathTrace.samples);
+          renderer.domElement.dataset.rendered = 'true';
+          if (pathTrace.samples < pathTraceTarget) requestRender();
+        }
+      } else if (sceneDirty && !tourBusy) {
         sceneDirty = false;
-        renderer.render(scene, camera);
+        renderView(viewCamera());
         renderer.domElement.dataset.rendered = 'true';
       }
     }
@@ -1925,19 +2135,330 @@
     const h = container.clientHeight;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    if (orthoCamera) {
+      orthoCamera.left = -orthoCamera.top * (w / h);
+      orthoCamera.right = orthoCamera.top * (w / h);
+      orthoCamera.updateProjectionMatrix();
+    }
+    applyOutputResolution();
     renderer.setSize(w, h);
     markSceneDirty();
   }
 
   function takeScreenshot() {
     if (!renderer || !scene || !camera) return;
-    renderer.render(scene, camera);
+    // While tracing, the drawing buffer already holds the accumulated image.
+    if (!pathTrace) renderView(viewCamera());
     renderer.domElement.dataset.rendered = 'true';
     const dataUrl = renderer.domElement.toDataURL('image/png');
     const link = document.createElement('a');
     link.download = 'floorplan-3d.png';
     link.href = dataUrl;
     link.click();
+  }
+
+  const ORBIT_MAX_POLAR = Math.PI / 2.05;
+  let orthoCamera: THREE.OrthographicCamera | null = null;
+  let orthographic = $state(false);
+  let viewsPanelOpen = $state(false);
+  let tourBusy = $state(false);
+  let tourFailed = $state(false);
+  let tourCancelled = false;
+  const savedViews = $derived<SavedView[]>($currentProject?.savedViews ?? []);
+  const tourViews = $derived(savedViews.filter(view => !view.floorId || view.floorId === $currentProject?.activeFloorId));
+
+  function viewCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera {
+    return orthographic && orthoCamera ? orthoCamera : camera;
+  }
+
+  let viewportEffectsOn = $state(false);
+  let viewportEffectsFailed = $state(false);
+  let viewportEffects: ViewportEffects | null = null;
+  let buildViewportEffects: typeof createViewportEffects | null = null;
+
+  function releaseViewportEffects() {
+    viewportEffects?.dispose();
+    viewportEffects = null;
+  }
+
+  function renderView(view: ViewCamera) {
+    if (viewportEffectsOn && buildViewportEffects) {
+      try {
+        if (viewportEffects?.camera !== view) {
+          releaseViewportEffects();
+          viewportEffects = buildViewportEffects(renderer, scene, view);
+        }
+        viewportEffects.render();
+        renderer.domElement.dataset.viewportEffects = 'on';
+        return;
+      } catch (error) {
+        console.error('Viewport effects failed', error);
+        releaseViewportEffects();
+        viewportEffectsOn = false;
+        viewportEffectsFailed = true;
+      }
+    }
+    renderer.render(scene, view);
+    renderer.domElement.dataset.viewportEffects = 'off';
+  }
+
+  /** The passes load on first use, so viewers that never enable them do not download or run them. */
+  async function toggleViewportEffects() {
+    viewportEffectsFailed = false;
+    if (viewportEffectsOn) {
+      viewportEffectsOn = false;
+      releaseViewportEffects();
+    } else {
+      try {
+        buildViewportEffects ??= (await import('$lib/utils/viewportEffects')).createViewportEffects;
+      } catch (error) {
+        console.error('Viewport effects could not load', error);
+        viewportEffectsFailed = true;
+        return;
+      }
+      if (!viewerMounted) return;
+      viewportEffectsOn = true;
+    }
+    markSceneDirty();
+  }
+
+  /** Match the orthographic frustum to what the perspective camera shows at the orbit target. */
+  function syncOrthoFromPerspective() {
+    if (!orthoCamera) return;
+    const halfHeight = camera.position.distanceTo(controls.target) * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    orthoCamera.top = halfHeight;
+    orthoCamera.bottom = -halfHeight;
+    orthoCamera.right = halfHeight * camera.aspect;
+    orthoCamera.left = -halfHeight * camera.aspect;
+    orthoCamera.near = 1;
+    orthoCamera.far = camera.far;
+    orthoCamera.zoom = 1;
+    orthoCamera.position.copy(camera.position);
+    orthoCamera.quaternion.copy(camera.quaternion);
+    orthoCamera.updateProjectionMatrix();
+    orthoCamera.updateMatrixWorld(true);
+    controls.object = orthoCamera;
+  }
+
+  /** Place the perspective camera where it shows what the orthographic view shows. */
+  function perspectiveFromOrtho() {
+    if (!orthoCamera) return;
+    const distance = (orthoCamera.top / orthoCamera.zoom) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const outward = orthoCamera.position.clone().sub(controls.target).normalize();
+    camera.position.copy(controls.target).addScaledVector(outward, distance);
+    camera.lookAt(controls.target);
+    camera.updateMatrixWorld(true);
+  }
+
+  function setOrthographic(on: boolean) {
+    if (on === orthographic || !renderer) return;
+    if (on) {
+      orthoCamera ??= new THREE.OrthographicCamera(-1, 1, 1, -1, 1, camera.far);
+      orthographic = true;
+      syncOrthoFromPerspective();
+    } else {
+      perspectiveFromOrtho();
+      orthographic = false;
+      controls.object = camera;
+    }
+    controls.update();
+    renderer.domElement.dataset.projection = on ? 'orthographic' : 'perspective';
+    markSceneDirty();
+  }
+
+  function currentPose(): ViewPose {
+    if (orthographic) perspectiveFromOrtho();
+    const target = walkthroughMode
+      ? camera.position.clone().add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(100))
+      : controls.target;
+    return {
+      position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+      target: { x: target.x, y: target.y, z: target.z },
+    };
+  }
+
+  function showPose({ position, target }: ViewPose) {
+    camera.position.set(position.x, position.y, position.z);
+    camera.lookAt(target.x, target.y, target.z);
+    camera.updateMatrixWorld(true);
+  }
+
+  /** Orbit limits must not nudge an eye-level view that was saved looking level or upward. */
+  function setViewPose(pose: ViewPose) {
+    const damping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = damping;
+    const offset = new THREE.Vector3(pose.position.x - pose.target.x, pose.position.y - pose.target.y, pose.position.z - pose.target.z);
+    controls.maxPolarAngle = Math.max(ORBIT_MAX_POLAR, Math.acos(THREE.MathUtils.clamp(offset.y / (offset.length() || 1), -1, 1)) + 1e-3);
+    controls.target.set(pose.target.x, pose.target.y, pose.target.z);
+    showPose(pose);
+    controls.update();
+    renderer.domElement.dataset.cameraPosition = [camera.position.x, camera.position.y, camera.position.z].map(v => v.toFixed(1)).join(',');
+    markSceneDirty();
+  }
+
+  function saveCurrentView() {
+    const number = savedViews.length + 1;
+    addSavedView({ name: $t('viewerNav.viewName', { count: number }), ...currentPose(), floorId: get(currentProject)?.activeFloorId });
+  }
+
+  function goToSavedView(view: SavedView) {
+    if (walkthroughMode) exitWalkthroughMode();
+    if (pathTrace) return;
+    setOrthographic(false);
+    if (view.floorId && view.floorId !== get(currentProject)?.activeFloorId) setActiveFloor(view.floorId);
+    setViewPose(view);
+  }
+
+  async function exportTour() {
+    if (tourBusy || pathTrace || tourViews.length < 2) return;
+    if (walkthroughMode) exitWalkthroughMode();
+    setOrthographic(false);
+    tourFailed = false;
+    tourBusy = true;
+    const views = [...tourViews];
+    const restore = currentPose();
+    controls.enabled = false;
+    try {
+      const mimeType = ['video/webm;codecs=vp9', 'video/webm', 'video/mp4'].find(type => MediaRecorder.isTypeSupported(type));
+      if (!mimeType) throw new Error('No supported video format');
+      // Rate 0 means a frame is captured only when requested, right after each render.
+      const stream = renderer.domElement.captureStream(0);
+      const track = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      const stopped = new Promise<void>((resolve, reject) => {
+        recorder.onstop = () => resolve();
+        recorder.onerror = () => reject(new Error('Recording failed'));
+      });
+      recorder.start(250);
+      const duration = tourDurationMs(views.length);
+      await new Promise<void>(resolve => {
+        // A slow GPU plays the tour slower rather than skipping most of it.
+        const maxStepMs = 200;
+        let previous: number | undefined, tourTime = 0;
+        const frame = (now: number) => {
+          if (tourCancelled) { resolve(); return; }
+          tourTime += Math.min(maxStepMs, now - (previous ?? now));
+          previous = now;
+          const progress = Math.min(1, tourTime / duration);
+          showPose(tourPose(views, progress));
+          renderer.render(scene, camera);
+          track.requestFrame?.();
+          if (progress < 1) requestAnimationFrame(frame);
+          else resolve();
+        };
+        requestAnimationFrame(frame);
+      });
+      // Give the encoder time to accept the final frames before closing the file.
+      await new Promise(resolve => setTimeout(resolve, 500));
+      recorder.stop();
+      await stopped;
+      stream.getTracks().forEach(track => track.stop());
+      if (tourCancelled) return;
+      // A browser can advertise a format it has no encoder for and record nothing.
+      if (!chunks.length) throw new Error('The browser recorded no video data');
+      const url = URL.createObjectURL(new Blob(chunks, { type: mimeType }));
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${get(currentProject)?.name ?? 'floorplan'}-tour.${mimeType.startsWith('video/mp4') ? 'mp4' : 'webm'}`;
+        link.click();
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    } catch (error) {
+      console.error('Video tour export failed', error);
+      tourFailed = true;
+    } finally {
+      tourBusy = false;
+      if (!tourCancelled) {
+        controls.enabled = true;
+        setViewPose(restore);
+      }
+    }
+  }
+
+  function walkCollider() {
+    if (!walkCollision || !currentFloor) return undefined;
+    if (walkObstacleFloor !== currentFloor || walkObstacleEye !== eyeHeight) {
+      walkObstacles = buildWalkObstacles(currentFloor, { eyeHeight });
+      walkObstacleFloor = currentFloor;
+      walkObstacleEye = eyeHeight;
+    }
+    return (x: number, y: number) => resolveWalkCollision(x, y, walkObstacles);
+  }
+
+  function toggleWalkCollision() {
+    walkCollision = !walkCollision;
+    markSceneDirty();
+  }
+
+  /** Renders a rasterised 360 view from the walkthrough position. It is not path traced. */
+  async function savePanorama() {
+    if (!renderer || !scene || !camera || panoramaBusy) return;
+    const faceSize = 1024, width = 4096, height = 2048;
+    panoramaBusy = true;
+    panoramaFailed = false;
+    try {
+      await new Promise(resolve => setTimeout(resolve));
+      const faces = renderPanoramaFaces(faceSize);
+      await new Promise(resolve => setTimeout(resolve));
+      const output = document.createElement('canvas');
+      output.width = width;
+      output.height = height;
+      const context = output.getContext('2d');
+      if (!context) throw new Error('2D canvas is unavailable.');
+      const pixels = facesToEquirect(faces, faceSize, width, height);
+      context.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, width, height), 0, 0);
+      const blob = await new Promise<Blob | null>(resolve => output.toBlob(resolve, 'image/jpeg', 0.92));
+      if (!blob) throw new Error('The panorama could not be encoded.');
+      const bytes = injectPanoramaXmp(new Uint8Array(await blob.arrayBuffer()), width, height);
+      const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }));
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${get(currentProject)?.name ?? 'floorplan'}-360.jpg`;
+        link.click();
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    } catch (error) {
+      console.error('Panorama export failed', error);
+      panoramaFailed = true;
+    } finally {
+      panoramaBusy = false;
+      markSceneDirty();
+    }
+  }
+
+  /** Uses the live renderer, so environment maps and textures need no second WebGL context. */
+  function renderPanoramaFaces(faceSize: number): Uint8ClampedArray[] {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = faceSize;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('2D canvas is unavailable.');
+    const yaw = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ').y;
+    const vertical = new THREE.Vector3(0, 1, 0);
+    const view = new THREE.PerspectiveCamera(90, 1, camera.near, camera.far);
+    view.position.copy(camera.position);
+    const pixelRatio = renderer.getPixelRatio();
+    const size = renderer.getSize(new THREE.Vector2());
+    return withInteriorScene(() => {
+      renderer.setPixelRatio(1);
+      renderer.setSize(faceSize, faceSize, false);
+      try {
+        return PANORAMA_FACES.map(face => {
+          view.up.set(...face.up).applyAxisAngle(vertical, yaw);
+          view.lookAt(new THREE.Vector3(...face.forward).applyAxisAngle(vertical, yaw).add(view.position));
+          view.updateMatrixWorld();
+          renderer.render(scene, view);
+          context.drawImage(renderer.domElement, 0, 0, faceSize, faceSize);
+          return context.getImageData(0, 0, faceSize, faceSize).data;
+        });
+      } finally {
+        renderer.setPixelRatio(pixelRatio);
+        renderer.setSize(size.x, size.y, false);
+      }
+    }, false);
   }
 
   function exportBlenderScene() {
@@ -1997,6 +2518,11 @@
 
     return () => {
       viewerMounted = false;
+      modelingTools?.dispose();
+      modelingTools = null;
+      tourCancelled = true;
+      releaseViewportEffects();
+      releasePathTrace();
       cancelAIRender();
       stopAISettings();
       stopTextures();
@@ -2034,6 +2560,7 @@
     </div>
   {:else}<!-- Every control below needs the renderer. -->
   <div class="absolute bottom-16 left-4 z-10 max-w-xs">
+    {#if viewportEffectsFailed}<p role="alert" class="mb-2 rounded bg-black/80 p-2 text-xs text-red-300">{$t('viewerNav.viewportEffectsFailed')}</p>{/if}
     {#if renderExportMessage}<p role="status" class="mb-2 rounded bg-black/80 p-2 text-xs text-white">{renderExportLabels[renderExportMessage] ? $t(renderExportLabels[renderExportMessage]) : renderExportMessage}</p>{/if}
     <button class="rounded bg-black/70 px-3 py-2 text-sm text-white hover:bg-black/80" onclick={exportBlenderScene}
       title={$t('viewerExport.help')}>{$t('viewerExport.button')}</button>
@@ -2044,7 +2571,7 @@
     </div>
   {/if}
   <!-- 3D Toolbar Row -->
-  <div class="absolute top-4 right-4 z-50 flex gap-1.5">
+  <div class="absolute top-4 left-4 right-4 z-50 flex flex-wrap justify-end gap-1.5 pointer-events-none [&>*]:pointer-events-auto">
     <!-- Multi-Floor Stacking Toggle -->
     <button
       onclick={() => { showAllFloors = !showAllFloors; rebuildScene(); }}
@@ -2058,6 +2585,16 @@
         <rect x="4" y="2" width="16" height="4" rx="1" opacity="0.3"/>
       </svg>
     </button>
+
+    {#each [['front', $t('viewerNav.front')], ['side', $t('viewerNav.side')], ['iso', $t('viewerNav.iso')], ['perspective', $t('viewerNav.fit')]] as [view, label]}
+      <button
+        onclick={() => applySceneView(view as SceneView)}
+        class="p-2 rounded-lg bg-black/70 text-white text-xs font-semibold hover:bg-black/80 transition-colors"
+        title={label}
+        aria-label={label}
+        data-testid={`scene-view-${view}`}
+      >{label.slice(0, 1)}</button>
+    {/each}
 
     <!-- Top-Down View Button -->
     <button
@@ -2074,6 +2611,69 @@
         <line x1="18" y1="12" x2="22" y2="12"/>
       </svg>
     </button>
+
+    <button
+      onclick={() => setOrthographic(!orthographic)}
+      disabled={walkthroughMode || !!$renderModeEnabled || tourBusy}
+      aria-pressed={orthographic}
+      class="px-2 py-2 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 {orthographic ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'bg-black/70 text-white hover:bg-black/80'}"
+      title={$t('viewerNav.orthographic')}
+      aria-label={$t('viewerNav.orthographic')}
+    >Or</button>
+
+    <button
+      onclick={toggleViewportEffects}
+      disabled={!!$renderModeEnabled || tourBusy}
+      aria-pressed={viewportEffectsOn}
+      class="px-2 py-2 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 {viewportEffectsOn ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'bg-black/70 text-white hover:bg-black/80'}"
+      title={$t('viewerNav.viewportEffects')}
+      aria-label={$t('viewerNav.viewportEffects')}
+    >Fx</button>
+
+    <div class="relative">
+      <button
+        onclick={() => viewsPanelOpen = !viewsPanelOpen}
+        aria-expanded={viewsPanelOpen}
+        class="p-2 rounded-lg transition-colors {viewsPanelOpen ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'bg-black/70 text-white hover:bg-black/80'}"
+        title={$t('viewerNav.savedViews')}
+        aria-label={$t('viewerNav.savedViews')}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 8a2 2 0 0 1 2-2h3l2-2h4l2 2h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          <circle cx="12" cy="13" r="3.5"/>
+        </svg>
+      </button>
+      {#if viewsPanelOpen}
+        <div class="absolute right-0 top-full mt-2 w-72 max-h-[60vh] overflow-y-auto rounded-lg bg-black/85 p-3 text-sm text-white shadow-xl">
+          <button onclick={saveCurrentView} disabled={tourBusy} class="w-full rounded bg-blue-600 px-2 py-1.5 font-semibold hover:bg-blue-500 disabled:opacity-50">{$t('viewerNav.saveCurrentView')}</button>
+          {#if savedViews.length === 0}
+            <p class="mt-2 text-xs text-white/70">{$t('viewerNav.noSavedViews')}</p>
+          {/if}
+          <ul class="mt-2 space-y-1">
+            {#each savedViews as view, index (view.id)}
+              <li class="flex items-center gap-1">
+                <input
+                  value={view.name}
+                  maxlength="60"
+                  aria-label={$t('viewerNav.viewNameLabel', { count: index + 1 })}
+                  onchange={(event) => { renameSavedView(view.id, event.currentTarget.value); event.currentTarget.value = get(currentProject)?.savedViews?.find(v => v.id === view.id)?.name ?? view.name; }}
+                  class="min-w-0 flex-1 rounded bg-white px-1.5 py-1 text-xs text-slate-900"
+                />
+                <button onclick={() => goToSavedView(view)} disabled={tourBusy} aria-label={$t('viewerNav.goToView', { name: view.name })} title={$t('viewerNav.goToView', { name: view.name })} class="rounded bg-white/15 px-2 py-1 text-xs hover:bg-white/25 disabled:opacity-50">&#8250;</button>
+                <button onclick={() => deleteSavedView(view.id)} disabled={tourBusy} aria-label={$t('viewerNav.deleteView', { name: view.name })} title={$t('viewerNav.deleteView', { name: view.name })} class="rounded bg-white/15 px-2 py-1 text-xs hover:bg-red-600 disabled:opacity-50">&times;</button>
+              </li>
+            {/each}
+          </ul>
+          <button onclick={exportTour} disabled={tourBusy || tourViews.length < 2 || !!$renderModeEnabled} class="mt-3 w-full rounded bg-white/15 px-2 py-1.5 font-semibold hover:bg-white/25 disabled:opacity-50">{tourBusy ? $t('viewerNav.exportingTour') : $t('viewerNav.exportTour')}</button>
+          {#if tourViews.length < 2}
+            <p class="mt-1 text-xs text-white/70">{$t('viewerNav.tourNeedsViews')}</p>
+          {/if}
+          {#if tourFailed}
+            <p role="alert" class="mt-1 text-xs text-red-300">{$t('viewerNav.tourFailed')}</p>
+          {/if}
+        </div>
+      {/if}
+    </div>
 
     <!-- Wall Transparency Toggle -->
     <button
@@ -2124,6 +2724,80 @@
         <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
       </svg>
     </button>
+
+    {#if $renderModeEnabled}
+      <div class="fixed left-4 bottom-12 z-20 w-56 space-y-2 rounded-lg bg-black/75 p-3 text-xs text-white" data-testid="render-panel">
+        <label class="block">{$t('renderPanel.quality')}
+          <select class="mt-1 w-full rounded bg-white/10 p-1" data-testid="render-quality" value={$renderSettings.quality} onchange={(e) => renderSettings.update(s => ({ ...s, quality: (e.target as HTMLSelectElement).value as RenderQuality }))}>
+            <option class="text-black" value="performance">{$t('renderPanel.performance')}</option>
+            <option class="text-black" value="balanced">{$t('renderPanel.balanced')}</option>
+            <option class="text-black" value="ultra">{$t('renderPanel.ultra')}</option>
+            <option class="text-black" value="photorealistic">{$t('renderPanel.photorealistic')}</option>
+          </select>
+        </label>
+        <label class="block">{$t('renderPanel.lighting')}
+          <select class="mt-1 w-full rounded bg-white/10 p-1" data-testid="render-lighting" value={$renderSettings.lighting} onchange={(e) => renderSettings.update(s => ({ ...s, lighting: (e.target as HTMLSelectElement).value as RenderLighting }))}>
+            <option class="text-black" value="day">{$t('renderPanel.day')}</option>
+            <option class="text-black" value="golden">{$t('renderPanel.golden')}</option>
+            <option class="text-black" value="night">{$t('renderPanel.night')}</option>
+          </select>
+        </label>
+        <label class="block">{$t('renderPanel.exposure')}
+          <input class="w-full" type="range" min="0.2" max="3" step="0.05" data-testid="render-exposure" value={$renderSettings.exposure} oninput={(e) => renderSettings.update(s => ({ ...s, exposure: Number((e.target as HTMLInputElement).value) }))} />
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="checkbox" data-testid="render-denoise" checked={$renderSettings.denoise} onchange={(e) => renderSettings.update(s => ({ ...s, denoise: (e.target as HTMLInputElement).checked }))} />
+          {$t('renderPanel.denoise')}
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="checkbox" data-testid="render-ceiling-lights" checked={$renderSettings.ceilingLights || LIGHTING_PRESETS[$renderSettings.lighting].interiorLight} disabled={LIGHTING_PRESETS[$renderSettings.lighting].interiorLight} onchange={(e) => renderSettings.update(s => ({ ...s, ceilingLights: (e.target as HTMLInputElement).checked }))} />
+          {$t('renderPanel.ceilingLights')}
+        </label>
+        {#if $renderSettings.ceilingLights || LIGHTING_PRESETS[$renderSettings.lighting].interiorLight}
+          <label class="block">{$t('renderPanel.temperature')}: {$renderSettings.lightTemperature} K
+            <input class="w-full" type="range" min="2200" max="6500" step="100" data-testid="render-temperature" value={$renderSettings.lightTemperature} onchange={(e) => renderSettings.update(s => ({ ...s, lightTemperature: Number((e.target as HTMLInputElement).value) }))} />
+          </label>
+          <label class="block">{$t('renderPanel.intensity')}
+            <input class="w-full" type="range" min="0.2" max="3" step="0.1" data-testid="render-intensity" value={$renderSettings.lightIntensity} onchange={(e) => renderSettings.update(s => ({ ...s, lightIntensity: Number((e.target as HTMLInputElement).value) }))} />
+          </label>
+        {/if}
+        <label class="block">{$t('renderPanel.output')}
+          <select class="mt-1 w-full rounded bg-white/10 p-1" data-testid="render-output" value={String($renderSettings.output)} onchange={(e) => { const value = (e.target as HTMLSelectElement).value; renderSettings.update(s => ({ ...s, output: (value === 'viewport' ? value : Number(value)) as RenderOutput })); }}>
+            <option class="text-black" value="viewport">{$t('renderPanel.outputViewport')}</option>
+            <option class="text-black" value="1920">{$t('renderPanel.outputFullHd')}</option>
+            <option class="text-black" value="3840">{$t('renderPanel.output4k')}</option>
+          </select>
+        </label>
+        {#if renderError}
+          <p data-testid="render-fallback">{$t('renderPanel.fallback')}</p>
+        {:else}
+          <p data-testid="render-samples">{$t('renderPanel.samples')}: {renderSamples} / {pathTraceTarget === Infinity ? '-' : pathTraceTarget}</p>
+        {/if}
+        <button class="w-full rounded bg-blue-600 p-1.5 hover:bg-blue-700" data-testid="render-save" onclick={takeScreenshot}>{$t('renderPanel.save')}</button>
+      </div>
+    {/if}
+
+    {#if !$renderModeEnabled}<button
+      onclick={togglePathTrace}
+      class="p-2 rounded-lg text-white transition-colors {pathTraceState === 'off' ? 'bg-black/70 hover:bg-black/80' : 'bg-blue-600 hover:bg-blue-700'}"
+      title={$t('viewerNav.pathTrace')}
+      aria-label={$t('viewerNav.pathTrace')}
+      aria-pressed={pathTraceState !== 'off'}
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>
+      </svg>
+    </button>{/if}
+
+    {#each [['glb', $t('viewerNav.exportGlb')], ['obj', $t('viewerNav.exportObj')]] as [format, label]}
+      <button
+        onclick={() => exportModel(format as 'glb' | 'obj')}
+        class="p-2 rounded-lg bg-black/70 text-white text-xs font-semibold uppercase hover:bg-black/80 transition-colors"
+        title={label}
+        aria-label={label}
+      >{format}</button>
+    {/each}
 
     <!-- 3D Screenshot Button -->
     <button
@@ -2392,6 +3066,18 @@
           <span class="w-10 text-right">{sprintSpeed}</span>
         </div>
       </label>
+      <button type="button" aria-pressed={walkCollision} onclick={toggleWalkCollision}
+        class="w-full flex items-center justify-between gap-2 rounded px-2 py-1 bg-white/10 hover:bg-white/20">
+        <span>{$t('viewerNav.walkCollision')}</span>
+        <span class={walkCollision ? 'text-green-300' : 'text-white/50'}>{walkCollision ? $t('viewerNav.on') : $t('viewerNav.off')}</span>
+      </button>
+      <button type="button" disabled={panoramaBusy} onclick={() => void savePanorama()}
+        class="w-full rounded px-2 py-1 bg-white/10 hover:bg-white/20 disabled:opacity-50">
+        {panoramaBusy ? $t('viewerNav.savingPanorama') : $t('viewerNav.savePanorama')}
+      </button>
+      {#if panoramaFailed}
+        <p role="alert" class="max-w-56 text-amber-200">{$t('viewerNav.panoramaFailed')}</p>
+      {/if}
     </div>
 
     <!-- Help Text -->
@@ -2411,11 +3097,33 @@
         </svg>
         {#if furniturePlacementMode}
           {$t('viewerFurniture.hint', { name: selectedCatalogId ? furnitureName(selectedCatalogId, $locale) : $t('viewerFurniture.fallback') })}
+        {:else if modelTool !== 'select'}
+          {$t(`modelTools.hint.${modelTool as Exclude<ModelTool, 'select'>}`)}
         {:else}
           {$t('viewerFurniture.paint')}
         {/if}
       </div>
     </div>
+
+    {#if !showAllFloors}
+      <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1 bg-black/70 rounded-lg p-1" role="toolbar" aria-label={$t('modelTools.pushpull')} data-testid="model-toolbar">
+        {#each MODEL_TOOLS as tool}
+          <button type="button" data-testid="model-tool-{tool}" aria-pressed={modelTool === tool} onclick={() => chooseModelTool(tool)} class="px-2 py-1 text-xs rounded text-white {modelTool === tool ? 'bg-blue-600' : 'hover:bg-white/20'}">{$t(`modelTools.${tool}`)}</button>
+        {/each}
+      </div>
+      {#if modelTool !== 'select'}
+        <form onsubmit={submitModelInput} class="absolute bottom-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-black/70 text-white text-xs rounded-lg px-3 py-2">
+          <label for="model-distance">{$t('modelTools.distance')}</label>
+          <input id="model-distance" data-testid="model-distance" bind:this={modelInputEl} bind:value={modelInput} autocomplete="off" placeholder={modelReadout === null ? '' : formatLengthPrecise(modelReadout, $projectSettings.units)} class="w-28 px-2 py-1 rounded bg-white text-gray-900 text-xs" />
+          {#if modelToolActive && modelReadout !== null}
+            <span data-testid="model-readout">{formatLengthPrecise(modelReadout, $projectSettings.units)}</span>
+          {/if}
+          {#if modelError}
+            <span data-testid="model-error" role="alert" class="text-red-300">{$t(`modelTools.error.${modelError}`)}</span>
+          {/if}
+        </form>
+      {/if}
+    {/if}
 
     <!-- Furniture Placement Toggle -->
     <button

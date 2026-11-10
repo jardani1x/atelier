@@ -11,8 +11,12 @@
   import { connectedWallEndpoints } from '$lib/utils/wallEditing';
   import { createDrawScheduler } from '$lib/utils/drawScheduler';
   import { activeFloor, selectedTool, selectedElementId, selectedElementIds, selectedRoomId, addWall, addDoor, addWindow, updateWall, moveWallEndpoint, moveWallGeometryDuringDrag, updateDoor, updateWindow, addFurniture, moveFurniture, transformFurnitureDuringDrag, rotateFurniture, rotateSelection, setFurnitureRotation, scaleFurniture, removeElement, placingFurnitureId, placingRotation, placingDoorType, placingWindowType, detectedRoomsStore, duplicateDoor, duplicateWindow, duplicateFurniture, duplicateSelection, pasteSelection, moveWallParallel, splitWall, wallSplitIntersectsOpening, snapEnabled, placingStair, addStair, moveStair, updateStair, placingColumn, placingColumnShape, addColumn, moveColumn, updateColumn, calibrationMode, calibrationPoints, updateBackgroundImage, setBackgroundImage, canvasZoom, canvasMinimumZoom, canvasCamX, canvasCamY, panMode, showFurnitureStore, addGuide, moveGuide, removeGuide, beginUndoGroup, endUndoGroup, layerVisibility, updateRoom, addMeasurement, updateMeasurement, removeMeasurement, addAnnotation, removeAnnotation, updateAnnotation, addTextAnnotation, removeTextAnnotation, updateTextAnnotation, moveTextAnnotation, toggleFurnitureLock, toggleSelectionLock, createGroup, ungroupElements, findGroupForElement, placingEntourageId, addEntourageItem, moveEntourage, resizeEntourage, currentProject, elevationWallId, elevationPickMode, doorJoinMode, joinScanDoors } from '$lib/stores/project';
+  import { addCabinet, moveCabinet, moveSolid, placingCabinet } from '$lib/stores/project';
+  import { findCabinetAt } from '$lib/utils/cabinetPlacement';
+  import { findSolidAt } from '$lib/utils/solids';
   import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation, CustomEntourageDef } from '$lib/models/types';
   import type { Floor, Room } from '$lib/models/types';
+  import { drawCabinet, drawSolid } from '$lib/utils/canvasRenderer';
   import { resolveRoomGeometry, roomLabelPosition, roomCentroid } from '$lib/utils/roomDetection';
   import { roomHoles } from '$lib/utils/roomNesting';
   import { getFloorBelow } from '$lib/utils/floors';
@@ -29,7 +33,7 @@
   import { roomTemplates, placeRoomTemplate } from '$lib/utils/roomTemplates';
   import { openingDropTarget } from '$lib/utils/openingDrop';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
-  import { projectSettings, formatLength, formatArea } from '$lib/stores/settings';
+  import { projectSettings, formatLength, formatArea, parseLengthInput } from '$lib/stores/settings';
   import type { ProjectSettings } from '$lib/stores/settings';
   import { snapStatus } from '$lib/utils/snapStep';
   import { angleSnapWithin, resizeFurnitureFromHandle, snap as _snap, type CanvasState } from '$lib/utils/canvasInteraction';
@@ -214,6 +218,10 @@
   let placingColShape: 'round' | 'square' = $state('round');
   let draggingColumnId: string | null = $state(null);
   let columnDragOffset: Point = { x: 0, y: 0 };
+  let draggingCabinetId: string | null = $state(null);
+  let cabinetDragOffset: Point = { x: 0, y: 0 };
+  let draggingSolidId: string | null = $state(null);
+  let solidDragOffset: Point = { x: 0, y: 0 };
   let isCalibrating: boolean = $state(false);
   let calPoints: Point[] = $state([]);
   let bgImage: HTMLImageElement | null = $state(null);
@@ -1417,6 +1425,11 @@
       }
     }
 
+    if (layerVis.furniture) {
+      for (const cabinet of floor.cabinets ?? []) drawCabinet(getCS(), cabinet, isSelected(cabinet.id));
+      for (const solid of floor.solids ?? []) drawSolid(getCS(), solid, isSelected(solid.id));
+    }
+
     // Columns
     if (layerVis.columns && floor.columns) {
       for (const col of floor.columns) {
@@ -2321,6 +2334,13 @@
       return;
     }
 
+    if ($placingCabinet && tool === 'select') {
+      const id = addCabinet({ x: snap(wp.x), y: snap(wp.y) }, $placingCabinet);
+      selectedElementId.set(id);
+      placingCabinet.set(null);
+      return;
+    }
+
     // Column placement: a select-tool mode (before select-mode handlers to avoid interception)
     if (isPlacingColumn && tool === 'select') {
       const pos = { x: snap(wp.x), y: snap(wp.y) };
@@ -2552,6 +2572,26 @@
         return false;
       }
 
+      const solid = findSolidAt(wp, currentFloor?.solids);
+      if (solid) {
+        if (selectElement(solid.id, e.shiftKey)) return;
+        if (!e.shiftKey && !solid.locked) {
+          draggingSolidId = solid.id;
+          solidDragOffset = { x: wp.x - solid.origin.x, y: wp.y - solid.origin.z };
+        }
+        return;
+      }
+
+      const cabinet = findCabinetAt(wp, currentFloor?.cabinets);
+      if (cabinet) {
+        if (selectElement(cabinet.id, e.shiftKey)) return;
+        if (!e.shiftKey && !cabinet.locked) {
+          draggingCabinetId = cabinet.id;
+          cabinetDragOffset = { x: wp.x - cabinet.position.x, y: wp.y - cabinet.position.y };
+        }
+        return;
+      }
+
       // Check columns
       const col = findColumnAt(wp);
       if (col) {
@@ -2762,7 +2802,7 @@
     }
 
     if ((draggingWallEndpoint || draggingWallParallel || draggingCurveHandle || draggingRoomId
-      || draggingStairId || draggingColumnId || draggingTextAnnotationId || draggingMultiSelect
+      || draggingStairId || draggingColumnId || draggingCabinetId || draggingSolidId ||draggingTextAnnotationId || draggingMultiSelect
       || draggingDoorId || draggingWindowId || draggingGuideId || draggingEntourageId || resizingEntourageId) && !geometryGestureStarted) {
       if (Math.hypot(e.clientX - canvasPressPosition.x, e.clientY - canvasPressPosition.y) < 3) return;
       beginUndoGroup();
@@ -2944,6 +2984,13 @@
         editingTextAnnotationPos = { x: sp.x, y: sp.y };
       }
     }
+    if (draggingSolidId) {
+      const dragged = currentFloor?.solids?.find(s => s.id === draggingSolidId);
+      if (dragged) moveSolid(dragged.id, { x: snap(mousePos.x - solidDragOffset.x), y: dragged.origin.y, z: snap(mousePos.y - solidDragOffset.y) });
+    }
+    if (draggingCabinetId) {
+      moveCabinet(draggingCabinetId, { x: snap(mousePos.x - cabinetDragOffset.x), y: snap(mousePos.y - cabinetDragOffset.y) });
+    }
     if (draggingColumnId && currentFloor?.columns) {
       const basePos = { x: mousePos.x - columnDragOffset.x, y: mousePos.y - columnDragOffset.y };
       moveColumn(draggingColumnId, { x: snap(basePos.x), y: snap(basePos.y) });
@@ -3103,6 +3150,8 @@
     resizingEntourageId = null;
     draggingStairId = null;
     draggingColumnId = null;
+    draggingCabinetId = null;
+    draggingSolidId = null;
     draggingDoorId = null;
     draggingWindowId = null;
     draggingHandle = null;
@@ -3295,9 +3344,8 @@
   }
 
   function typedWallLengthCm(): number | null {
-    const v = parseFloat(typedWallLength);
-    if (!isFinite(v) || v <= 0) return null;
-    return dimSettings.units === 'imperial' ? v * 2.54 : v;
+    const cm = parseLengthInput(typedWallLength, dimSettings.units);
+    return cm !== null && cm > 0 ? cm : null;
   }
 
   /** Override the wall end point to the exact typed length along the current direction. */
@@ -3326,12 +3374,13 @@
     }
     if (isControlKey(e)) return;
     shiftDown = e.shiftKey;
-    if (e.code === 'Space') { spaceDown = true; e.preventDefault(); return; }
+    const typingWallLength = currentTool === 'wall' && !!wallStart && !!typedWallLength;
+    if (e.code === 'Space' && !typingWallLength) { spaceDown = true; e.preventDefault(); return; }
 
     // Exact-length entry while drawing a wall (issue #6):
-    // type a number, then Enter places the wall at exactly that length.
+    // type a number with an optional unit, then Enter places the wall at exactly that length.
     if (currentTool === 'wall' && wallStart && !editingTextAnnotationId && !e.metaKey && !e.ctrlKey) {
-      if (/^[0-9.]$/.test(e.key)) {
+      if (/^[0-9.]$/.test(e.key) || (typingWallLength && /^[a-z'" ]$/i.test(e.key))) {
         typedWallLength += e.key;
         markDirty();
         e.preventDefault();
@@ -3409,6 +3458,7 @@
       placingEntourageId.set(null);
       placingStair.set(false);
       placingColumn.set(false);
+      placingCabinet.set(null);
       placingRotation.set(0);
       editingTextAnnotationId = null;
       textAnnotationMode = false;

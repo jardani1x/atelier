@@ -1,3 +1,32 @@
+# ATELIER Home Design Studio
+
+Browser-based interior design: 2D floor plans, 3D model, and progressive path-traced rendering on one project model. Runs locally. Built on [OpenPlan3D](https://github.com/laanlabs/openPlan3D) (MIT, see `LICENSE`), [three.js](https://threejs.org/) and [three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer).
+
+## Install and run
+
+Requires Node.js 20.19 or newer (Vite 7 requirement).
+
+```bash
+npm install
+npm run dev              # development server
+npm run build            # production build into build/
+node build/index.js      # serve the production build (PORT selects the port)
+```
+
+Tests:
+
+```bash
+npm test                 # Vitest
+npm run check            # svelte-check
+npx vite build && PLAYWRIGHT_PORT=4197 npx playwright test --project=chromium
+```
+
+Read [LIMITATIONS.md](LIMITATIONS.md) before relying on any feature, and [EVALUATION.md](EVALUATION.md) for scored evidence. Design notes are in [ARCHITECTURE.md](ARCHITECTURE.md), [RESEARCH.md](RESEARCH.md) and [CHANGELOG.md](CHANGELOG.md).
+
+The rest of this file is the upstream OpenPlan3D README, kept for reference. Its hosted links point to the upstream project, not to ATELIER.
+
+---
+
 # openplan3d
 
 **Free Open Source 2D/3D Floor Plan Editor**
@@ -189,6 +218,8 @@ npm run preview
 - **[TypeScript](https://www.typescriptlang.org)** — Type safety
 - **[jsPDF](https://github.com/parallax/jsPDF)** — PDF generation
 - **[dxf-writer](https://github.com/nicholaschiasson/dxf-writer)** — DXF export
+- **[PDF.js](https://github.com/mozilla/pdf.js)** — Reading uploaded PDF floor plans (Apache-2.0)
+- **[Supabase](https://supabase.com)** — Optional sign-in and cloud saves, see `CLOUD_SETUP.md`
 - **[Firebase](https://firebase.google.com)** — Hosting, analytics and temporary iPhone handoffs; projects stay local
 
 ---

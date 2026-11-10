@@ -2,6 +2,9 @@ import { defineConfig, devices } from '@playwright/test';
 
 // Use the real Node production build. Each test gets an empty browser profile;
 // no credentials or Firebase services are needed.
+const port = process.env.PLAYWRIGHT_PORT ?? '4188';
+const origin = `http://127.0.0.1:${port}`;
+
 export default defineConfig({
   testDir: './tests/browser',
   testMatch: '**/*.spec.ts',
@@ -17,7 +20,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:4188',
+    baseURL: origin,
     viewport: { width: 1440, height: 900 },
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -35,12 +38,12 @@ export default defineConfig({
   ],
   webServer: {
     command: 'node build/index.js',
-    url: 'http://127.0.0.1:4188',
+    url: origin,
     reuseExistingServer: false,
     timeout: 30_000,
     env: {
-      NODE_ENV: 'production', HOST: '127.0.0.1', PORT: '4188',
-      ORIGIN: 'http://127.0.0.1:4188', PUBLIC_ENABLE_ANALYTICS: 'false',
+      NODE_ENV: 'production', HOST: '127.0.0.1', PORT: port,
+      ORIGIN: origin, PUBLIC_ENABLE_ANALYTICS: 'false',
       HANDOFF_UPLOADS_ENABLED: 'false', HANDOFF_BUCKET: '',
       BODY_SIZE_LIMIT: '2M',
     },

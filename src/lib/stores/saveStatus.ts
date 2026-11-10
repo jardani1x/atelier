@@ -160,7 +160,7 @@ export function autoSave() { return persist(false); }
 export function manualSave() { return persist(true); }
 
 /** Preserve this tab's version under a fresh ID before changing editor state. */
-export async function saveCurrentAsCopy(): Promise<boolean> {
+export async function saveCurrentAsCopy(name?: string): Promise<boolean> {
   if (get(savingCopy)) return false;
   const project = get(currentProject);
   if (!project) return false;
@@ -169,7 +169,7 @@ export async function saveCurrentAsCopy(): Promise<boolean> {
   const copyingRevision = revision;
   savingCopy.set(true);
   try {
-    const copy = await localStore.saveCopy(project);
+    const copy = await (name === undefined ? localStore.saveCopy(project) : localStore.saveCopy(project, undefined, name));
     if (get(currentProject)?.id !== project.id) return false;
     if (revision !== copyingRevision || get(currentProject) !== project) {
       if (get(saveState) !== 'saved') saveError.set('A copy was saved, but you made more edits while it was saving. Save another copy to keep the latest version.');

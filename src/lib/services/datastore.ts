@@ -7,7 +7,7 @@ export { PROJECTS_STORAGE_KEY, LIBRARY_CHANGE_KEY } from './localDatabase';
 export interface DataStore {
   has(id: string): Promise<boolean>;
   assertCurrent(id: string): Promise<void>;
-  saveCopy(project: Project, suffix?: string): Promise<Project>;
+  saveCopy(project: Project, suffix?: string, name?: string): Promise<Project>;
   save(project: Project): Promise<void>;
   load(id: string): Promise<Project | null>;
   list(): Promise<{ id: string; name: string; updatedAt: string }[]>;
@@ -96,9 +96,9 @@ export function createLocalStore(): DataStore {
       void requestPersistentStorage();
     },
 
-    async saveCopy(project, suffix = 'Recovered copy') {
+    async saveCopy(project, suffix = 'Recovered copy', name) {
       const copy = readProject(project);
-      copy.name = `${copy.name || 'Untitled Project'} (${suffix})`;
+      copy.name = name ?? `${copy.name || 'Untitled Project'} (${suffix})`;
       copy.createdAt = copy.updatedAt = new Date();
       return mutateLibrary(async () => {
         await withDatabase(db => transaction(db, ['projects'], 'readwrite', async tx => {

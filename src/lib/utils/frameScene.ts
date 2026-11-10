@@ -1,15 +1,26 @@
 import { Box3, PerspectiveCamera, Vector3 } from 'three';
 
+export type SceneView = 'perspective' | 'top-down' | 'front' | 'side' | 'iso';
+
+/** Front and side sit slightly above the floor so OrbitControls' polar limit leaves them unchanged. */
+const VIEW_DIRECTIONS: Record<SceneView, Vector3> = {
+  perspective: new Vector3(1.2, 0.8, 1.2),
+  'top-down': new Vector3(0, 1, 0.00001),
+  front: new Vector3(0, 0.05, 1),
+  side: new Vector3(1, 0.05, 0),
+  iso: new Vector3(1, 1, 1),
+};
+
 /** Fit every corner using the camera's horizontal and vertical field of view. */
 export function frameScene(camera: PerspectiveCamera, bounds: Box3, target: Vector3,
-  { view = 'perspective', verticalInset = 0 }: { view?: 'perspective' | 'top-down'; verticalInset?: number } = {}) {
+  { view = 'perspective', verticalInset = 0 }: { view?: SceneView; verticalInset?: number } = {}) {
   const box = bounds.isEmpty()
     ? new Box3(new Vector3(-200, 0, -200), new Vector3(200, 280, 200))
     : bounds;
   box.getCenter(target);
   // Stay just off the pole so camera.up and the viewing direction have a stable
   // cross product, including after OrbitControls clamps its polar angle.
-  const outward = (view === 'top-down' ? new Vector3(0, 1, 0.00001) : new Vector3(1.2, 0.8, 1.2)).normalize();
+  const outward = VIEW_DIRECTIONS[view].clone().normalize();
   const right = new Vector3().crossVectors(camera.up, outward).normalize();
   const up = new Vector3().crossVectors(outward, right).normalize();
   const tanY = Math.tan(camera.getEffectiveFOV() * Math.PI / 360);

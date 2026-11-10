@@ -11,6 +11,7 @@
   import { focusInlineEditor } from '$lib/utils/inlineEditorFocus';
   import { openProject, openStoredProject } from '$lib/services/projectOpening';
   import { saveConflict, savingCopy, saveCurrentAsCopy } from '$lib/stores/saveStatus';
+  import { cloudConfigured, cloudErrorKeys, cloudSaveState, initCloud, saveToCloud } from '$lib/stores/cloud';
   import ImportError from '$lib/components/ImportError.svelte';
   import ProjectPackageDialog from '$lib/components/ProjectPackageDialog.svelte';
   import LibraryRestoreDialog from '$lib/components/LibraryRestoreDialog.svelte';
@@ -22,6 +23,7 @@
   import type { FloorSeed } from '$lib/stores/project';
   import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, createDefaultProject, snapEnabled, canvasZoom, canvasMinimumZoom, panMode, showFurnitureStore, layerVisibility, activeFloor, selectedElementId, elevationWallId, elevationPickMode } from '$lib/stores/project';
   import { get } from 'svelte/store';
+  import { renderModeEnabled } from '$lib/utils/renderSettings';
   import type { Floor } from '$lib/models/types';
   import { exportAsJSON } from '$lib/utils/export';
   import { createProjectFromRoomPlan, extractRoomJsonFromZip, isRoomPlanJson } from '$lib/utils/roomplanImport';
@@ -70,7 +72,8 @@
   }));
   onDestroy(viewMode.subscribe((m) => { mode = m; }));
 
-  function setMode(m: '2d' | '3d') {
+  function setMode(m: '2d' | '3d', render = false) {
+    renderModeEnabled.set(render);
     viewMode.set(m);
   }
 
@@ -142,6 +145,20 @@
   let secondsSinceSave = $state<number | null>(null);
   let lastSavedTime: Date | null = $state(null);
   onDestroy(lastSavedAt.subscribe(v => { lastSavedTime = v; updateLastSavedText(); }));
+  let saveAsOpen = $state(false);
+  let saveAsName = $state('');
+
+  function openSaveAs() {
+    saveAsName = get(currentProject)?.name ?? '';
+    saveAsOpen = !saveAsOpen;
+  }
+
+  async function confirmSaveAs(event: SubmitEvent) {
+    event.preventDefault();
+    const name = saveAsName.trim();
+    if (name && await saveCurrentAsCopy(name)) saveAsOpen = false;
+  }
+
   const lastSavedText = $derived(secondsSinceSave === null ? $t('saveControls.never')
     : secondsSinceSave < 5 ? $t('saveControls.now')
     : secondsSinceSave < 60 ? $t('saveControls.seconds', { count: secondsSinceSave })
@@ -264,6 +281,7 @@
 
   onMount(() => {
     const stopAutoSave = initAutoSave();
+    void initCloud();
     initVersionHistory();
     const openSettings = () => { if (!hasOpenModal()) settingsOpen = true; };
     window.addEventListener('open-settings', openSettings);
@@ -508,8 +526,12 @@
     >2D</button>
     <button
       onclick={() => setMode('3d')}
-      class="px-3 max-xl:px-2 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+      class="px-3 max-xl:px-2 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' && !$renderModeEnabled ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
     >3D</button>
+    <button
+      onclick={() => setMode('3d', true)}
+      class="px-3 max-xl:px-2 py-1 text-xs font-semibold rounded-full transition-colors {$renderModeEnabled ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+    >{$t('renderPanel.mode')}</button>
   </div>
 
   <!-- Zoom remains available on the canvas and in the compact toolbar menu. -->
@@ -691,13 +713,46 @@
   <button onclick={save} class="px-3 py-1.5 max-xl:px-2.5 text-sm bg-white text-slate-800 font-semibold rounded-lg hover:bg-blue-50 transition-colors shadow-sm">
     {$t('saveControls.save')}
   </button>
+  {#if cloudConfigured}
+    <button onclick={() => saveToCloud()} disabled={$cloudSaveState.status === 'saving'} class="px-2.5 py-1.5 text-sm bg-white/10 text-white font-semibold rounded-lg hover:bg-white/20 transition-colors whitespace-nowrap disabled:opacity-50">
+      {$cloudSaveState.status === 'saving' ? $t('cloud.saving') : $cloudSaveState.status === 'saved' ? $t('cloud.saved') : $t('cloud.save')}
+    </button>
+  {/if}
+  <div class="relative shrink-0">
+    <button onclick={openSaveAs} aria-expanded={saveAsOpen} class="px-2.5 py-1.5 text-sm bg-white/10 text-white font-semibold rounded-lg hover:bg-white/20 transition-colors whitespace-nowrap">
+      {$t('saveControls.saveAs')}
+    </button>
+    {#if saveAsOpen}
+      <form onsubmit={confirmSaveAs} class="absolute right-0 top-full mt-2 z-[80] w-64 rounded-lg bg-white p-3 text-slate-800 shadow-xl">
+        <label class="block text-xs font-semibold">
+          {$t('saveControls.saveAsName')}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input bind:value={saveAsName} autofocus maxlength="120" class="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm font-normal" />
+        </label>
+        <div class="mt-3 flex justify-end gap-2">
+          <button type="button" onclick={() => saveAsOpen = false} class="px-2 py-1 text-sm rounded hover:bg-slate-100">{$t('saveControls.cancel')}</button>
+          <button type="submit" disabled={$savingCopy || !saveAsName.trim()} class="px-2 py-1 text-sm font-semibold rounded bg-blue-600 text-white disabled:opacity-50">{$savingCopy ? $t('saveControls.savingCopy') : $t('saveControls.saveAsConfirm')}</button>
+        </div>
+      </form>
+    {/if}
+  </div>
 </div>
+
+{#if $cloudSaveState.status === 'error'}
+  <div role="alert" class="flex flex-wrap items-center gap-3 bg-amber-50 border-b border-amber-200 px-4 py-3 text-sm text-amber-900">
+    <span class="flex-1 min-w-48">{$t(cloudErrorKeys[$cloudSaveState.code])}</span>
+    {#if $cloudSaveState.code === 'conflict'}
+      <button class="font-semibold underline" onclick={() => saveToCloud(true)}>{$t('cloud.replace')}</button>
+    {/if}
+    <button class="font-semibold underline" onclick={() => cloudSaveState.set({ status: 'idle' })}>{$t('saveControls.cancel')}</button>
+  </div>
+{/if}
 
 {#if $saveError}
   <div role="alert" class="flex flex-wrap items-center gap-3 bg-red-50 border-b border-red-200 px-4 py-3 text-sm text-red-900">
     <span class="flex-1 min-w-48">{$t('saveControls.error')} {projectServiceMessage($saveError, $locale)}</span>
     {#if $saveConflict}
-      <button class="font-semibold underline disabled:opacity-50" disabled={$savingCopy} onclick={saveCurrentAsCopy}>{$savingCopy ? $t('saveControls.savingCopy') : $t('saveControls.copy')}</button>
+      <button class="font-semibold underline disabled:opacity-50" disabled={$savingCopy} onclick={() => saveCurrentAsCopy()}>{$savingCopy ? $t('saveControls.savingCopy') : $t('saveControls.copy')}</button>
     {:else}
       <button class="font-semibold underline" onclick={save}>{$t('saveControls.retry')}</button>
     {/if}

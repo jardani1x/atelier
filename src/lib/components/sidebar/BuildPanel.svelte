@@ -1,4 +1,16 @@
 <script lang="ts">
+  import { placingCabinet } from '$lib/stores/project';
+  import { CABINET_PRESETS, type CabinetPresetId } from '$lib/utils/cabinetPlacement';
+
+  const cabinetPresetIds = Object.keys(CABINET_PRESETS) as CabinetPresetId[];
+
+  function armCabinet(id: CabinetPresetId) {
+    const preset = CABINET_PRESETS[id];
+    const next = $placingCabinet === preset ? null : preset;
+    setTool('select');
+    placingCabinet.set(next);
+  }
+
   import { furnitureName } from '$lib/i18n/furnitureNames';
   import { t, locale } from '$lib/i18n';
   import { entourageLabels } from '$lib/i18n/entourageLabels';
@@ -7,6 +19,7 @@
   import { modalDialog } from '$lib/utils/modalDialog';
   import { openProject } from '$lib/services/projectOpening';
   import ImportError from '$lib/components/ImportError.svelte';
+  import FloorPlanImportModal from '$lib/components/FloorPlanImportModal.svelte';
   import { onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { activateMeasurementTool, selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY, placingEntourageId, addCustomEntourage } from '$lib/stores/project';
@@ -29,6 +42,7 @@
   onDestroy(() => openingLifetime.abort());
 
   let importError = $state<string | null>(null);
+  let floorPlanImportOpen = $state(false);
   let largeImageWarning = $state(false);
   let unsupportedImage = $state(false);
 
@@ -472,6 +486,18 @@
           </button>
         </div>
 
+        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">{$t('buildTools.cabinetry')}</h3>
+        <div class="grid grid-cols-2 gap-1" data-testid="cabinet-presets">
+          {#each cabinetPresetIds as id}
+            <button
+              class="px-2 py-2 rounded-lg text-xs text-left transition-colors {$placingCabinet === CABINET_PRESETS[id] ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              aria-pressed={$placingCabinet === CABINET_PRESETS[id]}
+              data-testid={`cabinet-preset-${id}`}
+              onclick={() => armCabinet(id)}
+            >{$t(`cabinetPresets.${id}`)}</button>
+          {/each}
+        </div>
+
         <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">{$t('buildTools.annotate')}</h3>
         <button
           class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'text' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
@@ -512,6 +538,19 @@
         </button>
 
         <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">{$t('buildTools.import')}</h3>
+        <button
+          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
+          onclick={() => floorPlanImportOpen = true}
+        >
+          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M3 12h7M14 12h7M12 3v5M12 13v8"/></svg>
+          </div>
+          <div class="text-left">
+            <div class="font-medium">{$t('floorPlanImport.button')}</div>
+            <div class="text-xs text-gray-400">{$t('floorPlanImport.buttonHelp')}</div>
+          </div>
+        </button>
+        {#if floorPlanImportOpen}<FloorPlanImportModal onclose={() => floorPlanImportOpen = false} />{/if}
         <button
           class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
           onclick={onImportImage}

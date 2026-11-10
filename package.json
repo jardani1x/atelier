@@ -35,7 +35,6 @@
 		"@tailwindcss/vite": "^4.1.18",
 		"@types/three": "^0.182.0",
 		"fake-indexeddb": "^6.2.5",
-		"firebase": "^12.18.0",
 		"svelte": "^5.57.0",
 		"svelte-check": "^4.3.6",
 		"tailwindcss": "^4.1.18",
@@ -45,10 +44,12 @@
 		"vitest": "^5.0.5"
 	},
 	"dependencies": {
+		"@supabase/supabase-js": "^2.119.0",
 		"dxf-writer": "^1.18.4",
 		"google-auth-library": "11.0.2",
 		"jspdf": "^4.2.1",
 		"jszip": "^3.10.1",
+		"pdfjs-dist": "^5.7.284",
 		"svg-pathdata": "6.0.3",
 		"three-gpu-pathtracer": "0.0.24",
 		"three-mesh-bvh": "0.9.10"

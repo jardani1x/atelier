@@ -4,7 +4,8 @@ import { splitWallGeometry } from '$lib/utils/splitWallGeometry';
 import { wallPathProfile } from '$lib/utils/wallProfiles';
 import { duplicatePlanSelection, pastePlanSelection, shiftedOpeningPosition } from '$lib/utils/duplicateSelection';
 import { writable, derived, get, type Writable } from 'svelte/store';
-import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem, InterchangeState } from '$lib/models/types';
+import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, Cabinet, BackgroundImage, GuideLine, ElementGroup, EntourageItem, InterchangeState } from '$lib/models/types';
+import { draftToElements, type PlanDraft } from '$lib/utils/floorPlanDetect';
 import { planWallResize, finitePoint, validPositiveDimension, validOpeningPosition, type WallEndpoint } from '$lib/utils/wallEditing';
 import { getOuterWalls } from '$lib/utils/outerWalls';
 import { nextFloorLevel, floorElevations, validFloorElevation, orderedFloors, DEFAULT_FLOOR_SPACING } from '$lib/utils/floors';
@@ -14,6 +15,8 @@ import { detailItem, itemDetails, validateItemDetails } from '$lib/utils/itemDet
 import { readProject } from '$lib/utils/projectValidation';
 import { mergeRoomPlanFloors, selectableContentIds, type AddedContent } from '$lib/utils/roomplanMerge';
 import { doorJoin } from '$lib/utils/scanAlignment';
+import type { SavedView, Solid, SolidVector } from '$lib/models/types';
+import { pushPullCabinet, pushPullSolid, pushPullWall, type PushPullError, type PushPullTarget } from '$lib/utils/solids';
 
 
 function uid(): string {
@@ -53,6 +56,7 @@ export function activateMeasurementTool(tool: 'measure' | 'annotate') {
   placingFurnitureId.set(null);
   placingStair.set(false);
   placingColumn.set(false);
+  placingCabinet.set(null);
   placingEntourageId.set(null);
   calibrationMode.set(false);
   doorJoinMode.set(null);
@@ -208,6 +212,7 @@ function clearFloorContext() {
   placingFurnitureId.set(null);
   placingStair.set(false);
   placingColumn.set(false);
+  placingCabinet.set(null);
   placingEntourageId.set(null);
 }
 
@@ -215,7 +220,7 @@ function clearFloorContext() {
 function pruneFloorContext(project: Project) {
   const floor = project.floors.find(f => f.id === project.activeFloorId) ?? project.floors[0];
   if (!floor) return;
-  const ids = new Set([floor.walls, floor.doors, floor.windows, floor.furniture, floor.stairs ?? [], floor.columns ?? [], floor.guides ?? [],
+  const ids = new Set([floor.walls, floor.doors, floor.windows, floor.furniture, floor.stairs ?? [], floor.columns ?? [], floor.cabinets ?? [], floor.solids ?? [], floor.guides ?? [],
     floor.measurements ?? [], floor.annotations ?? [], floor.textAnnotations ?? [], floor.entourage ?? []].flat().map(item => item.id));
   const prune = (store: Writable<string | null>, known: Set<string>) => {
     const id = get(store);
@@ -415,7 +420,7 @@ export function rotateSelection(ids: ReadonlySet<string>, degrees = 15) {
   const updates = selectionRotation(floor,ids,degrees,project.customEntourage);
   if (!updates.size) return;
   mutate(f => {
-    for (const item of [...f.furniture,...f.stairs ?? [],...f.columns ?? [],...f.entourage ?? []]) {
+    for (const item of [...f.furniture,...f.stairs ?? [],...f.columns ?? [],...f.cabinets ?? [],...f.entourage ?? []]) {
       const update = updates.get(item.id);
       if (update) Object.assign(item,update);
     }
@@ -519,6 +524,17 @@ export function setBackgroundImage(bg: BackgroundImage | undefined) {
   });
 }
 
+/** Adds a reviewed floor plan draft and its source image to the active floor as one undo step. */
+export function importFloorPlan(draft: PlanDraft, size: { width: number; height: number }, cmPerPixel: number, background: BackgroundImage) {
+  const { walls, doors, windows } = draftToElements(draft, size, cmPerPixel, uid);
+  mutate((f) => {
+    f.backgroundImage = background;
+    f.walls = [...f.walls, ...walls];
+    f.doors = [...f.doors, ...doors];
+    f.windows = [...f.windows, ...windows];
+  }, 'Imported floor plan');
+}
+
 export function updateBackgroundImage(updates: Partial<BackgroundImage>) {
   mutate((f) => {
     if (f.backgroundImage) Object.assign(f.backgroundImage, updates);
@@ -562,6 +578,107 @@ export function moveColumn(id: string, position: Point) {
     currentProject.set({ ...p });
   }
 }
+
+export function addCabinet(position: Point, overrides: Partial<Omit<Cabinet, 'id' | 'position'>> = {}): string {
+  const id = uid();
+  mutate((f) => {
+    if (!f.cabinets) f.cabinets = [];
+    f.cabinets.push({
+      width: 120, height: 220, depth: 60, thickness: 1.8, compartments: 2, shelves: [0.33, 0.66], doors: 'hinged',
+      rotation: 0, color: '#b08d62', roughness: 0.55, metalness: 0, ...overrides, id, position,
+    });
+  }, 'Added cabinet');
+  return id;
+}
+
+export function updateCabinet(id: string, updates: Partial<Omit<Cabinet, 'id'>>) {
+  mutate((f) => {
+    const cabinet = f.cabinets?.find((c) => c.id === id);
+    if (cabinet) Object.assign(cabinet, updates);
+  }, undefined, coalesceKeyFor('cabinet', id, updates));
+}
+
+export function removeCabinet(id: string) {
+  mutate((f) => {
+    if (f.cabinets) f.cabinets = f.cabinets.filter((c) => c.id !== id);
+  }, 'Removed cabinet');
+}
+
+export function moveCabinet(id: string, position: Point) {
+  const p = get(currentProject);
+  const floor = p?.floors.find((f) => f.id === p.activeFloorId);
+  const cabinet = floor?.cabinets?.find((c) => c.id === id);
+  if (p && cabinet && !samePoint(cabinet.position, position)) {
+    cabinet.position = position;
+    p.updatedAt = new Date();
+    currentProject.set({ ...p });
+  }
+}
+
+export function addSolid(solid: Omit<Solid, 'id'>): string {
+  const id = uid();
+  mutate((f) => {
+    if (!f.solids) f.solids = [];
+    f.solids.push({ ...solid, id });
+  }, 'Drew shape');
+  return id;
+}
+
+export function updateSolid(id: string, updates: Partial<Omit<Solid, 'id'>>) {
+  mutate((f) => {
+    const solid = f.solids?.find((s) => s.id === id);
+    if (solid) Object.assign(solid, updates);
+  }, undefined, coalesceKeyFor('solid', id, updates));
+}
+
+/** Move a shape without an undo entry, for dragging. */
+export function moveSolid(id: string, origin: SolidVector) {
+  const p = get(currentProject);
+  const floor = p?.floors.find((f) => f.id === p.activeFloorId);
+  const solid = floor?.solids?.find((s) => s.id === id);
+  if (p && solid && (solid.origin.x !== origin.x || solid.origin.y !== origin.y || solid.origin.z !== origin.z)) {
+    solid.origin = origin;
+    p.updatedAt = new Date();
+    currentProject.set({ ...p });
+  }
+}
+
+/** Moves one face by a signed distance in cm as a single Undo step. Returns why it was refused, or null. */
+export function applyPushPull(target: PushPullTarget, distance: number): PushPullError | null {
+  const p = get(currentProject);
+  const floor = p?.floors.find((f) => f.id === p.activeFloorId);
+  if (!floor) return 'missing';
+  if (target.kind === 'solid') {
+    const solid = floor.solids?.find((s) => s.id === target.id);
+    if (!solid) return 'missing';
+    const result = pushPullSolid(solid, target.face, distance);
+    if (!result.ok) return result.error;
+    mutate(() => { Object.assign(solid, result.value); }, 'Push/pull');
+    return null;
+  }
+  if (target.kind === 'cabinet') {
+    const cabinet = floor.cabinets?.find((c) => c.id === target.id);
+    if (!cabinet) return 'missing';
+    const result = pushPullCabinet(cabinet, target.axis, target.sign, distance);
+    if (!result.ok) return result.error;
+    mutate(() => { Object.assign(cabinet, result.value); }, 'Push/pull');
+    return null;
+  }
+  const wall = floor.walls.find((w) => w.id === target.id);
+  if (!wall) return 'missing';
+  const result = pushPullWall(floor, wall, target.face, target.sign, distance);
+  if (!result.ok) return result.error;
+  mutate((f) => {
+    for (const [id, update] of result.value) {
+      const item = f.walls.find((w) => w.id === id);
+      if (item) Object.assign(item, update);
+    }
+  }, 'Push/pull');
+  return null;
+}
+
+/** Armed cabinet preset; the next plan click places it. */
+export const placingCabinet = writable<Partial<Omit<Cabinet, 'id' | 'position'>> | null>(null);
 
 /** Tool for placing columns */
 export const placingColumn = writable<boolean>(false);
@@ -628,6 +745,27 @@ export function addCustomEntourage(name: string, dataUrl: string, aspect: number
   return id;
 }
 
+export function addSavedView(view: Omit<SavedView, 'id'>): string {
+  const p = get(currentProject);
+  if (!p) return '';
+  const id = uid();
+  mutate(() => { p.savedViews = [...(p.savedViews ?? []), { id, ...view }]; }, 'Saved view');
+  return id;
+}
+
+export function renameSavedView(id: string, name: string) {
+  const p = get(currentProject);
+  const trimmed = name.trim();
+  if (p?.savedViews?.some(v => v.id === id) && trimmed) {
+    mutate(() => { p.savedViews = p.savedViews!.map(v => v.id === id ? { ...v, name: trimmed } : v); }, 'Saved view', `saved-view-name-${id}`);
+  }
+}
+
+export function deleteSavedView(id: string) {
+  const p = get(currentProject);
+  if (p?.savedViews?.some(v => v.id === id)) mutate(() => { p.savedViews = p.savedViews!.filter(v => v.id !== id); }, 'Saved view');
+}
+
 /** Scale calibration mode */
 export const calibrationMode = writable<boolean>(false);
 export const calibrationPoints = writable<Point[]>([]);
@@ -671,6 +809,8 @@ export function removeElement(id: string) {
     f.furniture = f.furniture.filter((fi) => fi.id !== id);
     if (f.stairs) f.stairs = f.stairs.filter((s) => s.id !== id);
     if (f.columns) f.columns = f.columns.filter((c) => c.id !== id);
+    if (f.cabinets) f.cabinets = f.cabinets.filter((c) => c.id !== id);
+    if (f.solids) f.solids = f.solids.filter((s) => s.id !== id);
     if (f.textAnnotations) f.textAnnotations = f.textAnnotations.filter((t) => t.id !== id);
     if (f.measurements) f.measurements = f.measurements.filter(item => item.id !== id);
     if (f.annotations) f.annotations = f.annotations.filter(item => item.id !== id);

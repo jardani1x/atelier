@@ -100,10 +100,10 @@ it('exports DWG as a DXF download and reports whether anything was written', asy
   expect(downloaded).toHaveLength(1);
 });
 
-it('localizes the PDF title block, schedule and summary labels and names OpenPlan3D', async () => {
+it('localizes the PDF title block, schedule and summary labels and names ATELIER', async () => {
   await exportPDF(namedProject());
   let text = pdfText.mock.calls.map(call => String(call[0]));
-  expect(text).toContain('Created with OpenPlan3D');
+  expect(text).toContain('Created with ATELIER');
   expect(text).toContain('Room Schedule');
   expect(text).toContain('Units: m, cm');
   expect(text.some(value => /^Date: /.test(value))).toBe(true);
@@ -112,7 +112,7 @@ it('localizes the PDF title block, schedule and summary labels and names OpenPla
   pdfText.mockClear();
   await exportPDF(namedProject(), 'pt');
   text = pdfText.mock.calls.map(call => String(call[0]));
-  expect(text).toContain('Criado com OpenPlan3D');
+  expect(text).toContain('Criado com ATELIER');
   expect(text).toContain('Tabela de ambientes');
   expect(text).toContain('Revestimento do piso');
   expect(text).toContain('Unidades: m, cm');

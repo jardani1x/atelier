@@ -8,6 +8,8 @@ export interface WalkthroughSettings {
   sprintSpeed: number;
   eyeHeight: number;
   floorElevation: number;
+  /** Corrects a proposed plan position (camera x and z) for walls and furniture. */
+  collide?: (x: number, y: number) => { x: number; y: number };
 }
 
 /** Local walkthrough input and motion; independent of rendering and pointer lock. */
@@ -54,6 +56,14 @@ export class WalkthroughMotion {
 
   advance(timestamp: number, camera: Camera, settings: WalkthroughSettings) {
     camera.position.y = settings.floorElevation + settings.eyeHeight;
+    const collide = () => {
+      if (!settings.collide) return;
+      const { x, y } = settings.collide(camera.position.x, camera.position.z);
+      camera.position.x = x;
+      camera.position.z = y;
+    };
+    // Also covers starting inside furniture and collision being switched on.
+    collide();
     if (!Number.isFinite(timestamp)) { this.reset(); return; }
     if (this.previous === null) { this.previous = timestamp; return; }
     if (timestamp <= this.previous) {
@@ -97,6 +107,7 @@ export class WalkthroughMotion {
       const yaw = this.rotation.y + yawSpeed * step / 2;
       camera.position.x += Math.cos(yaw) * rightDistance - Math.sin(yaw) * forwardDistance;
       camera.position.z -= Math.sin(yaw) * rightDistance + Math.cos(yaw) * forwardDistance;
+      collide();
       this.rotation.y += yawSpeed * step;
       this.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.rotation.x + pitchSpeed * step));
     }
@@ -106,6 +117,7 @@ export class WalkthroughMotion {
       const yaw = this.rotation.y;
       camera.position.x += (Math.cos(yaw) * this.rightVelocity - Math.sin(yaw) * this.forwardVelocity) / 10;
       camera.position.z -= (Math.sin(yaw) * this.rightVelocity + Math.cos(yaw) * this.forwardVelocity) / 10;
+      collide();
       this.rightVelocity = this.forwardVelocity = 0;
     }
     camera.quaternion.setFromEuler(this.rotation);

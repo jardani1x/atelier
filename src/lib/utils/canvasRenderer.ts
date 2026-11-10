@@ -8,7 +8,9 @@ import { dimensionPlanGeometry } from './dimensionPlanGeometry';
  * Extracted from FloorPlanCanvas.svelte.
  */
 import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, Floor, Annotation } from '$lib/models/types';
-import type { Room } from '$lib/models/types';
+import type { Room, Cabinet, Solid } from '$lib/models/types';
+import { solidFootprint, validSolid } from '$lib/utils/solids';
+import { cabinetBounds, cabinetPanels } from '$lib/utils/cabinetGeometry';
 import type { CanvasState } from '$lib/utils/canvasInteraction';
 import type { ProjectSettings } from '$lib/stores/settings';
 import { formatLength, formatArea } from '$lib/stores/settings';
@@ -1144,6 +1146,59 @@ export function drawStair(cs: CanvasState, stair: Stair, selected: boolean): voi
     ctx.setLineDash([]);
   }
 
+  ctx.restore();
+}
+
+// ── Cabinet drawing ──────────────────────────────────────────────────
+
+/** Plan view drawn from the same panel list as the 3D model, so both views cannot disagree. */
+export function drawCabinet(cs: CanvasState, cabinet: Cabinet, selected: boolean): void {
+  const { ctx, zoom } = cs;
+  const s = wts(cs, cabinet.position.x, cabinet.position.y);
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate((cabinet.rotation * Math.PI) / 180);
+  const stroke = selected ? '#3b82f6' : '#555';
+  const panels = cabinetPanels(cabinet);
+  const { min, max } = cabinetBounds(panels);
+  ctx.fillStyle = selected ? '#bfdbfe' : cabinet.color;
+  ctx.globalAlpha = 0.35;
+  ctx.fillRect(min.x * zoom, min.z * zoom, (max.x - min.x) * zoom, (max.z - min.z) * zoom);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1;
+  for (const panel of panels) {
+    if (panel.role === 'top' || panel.role === 'bottom' || panel.role === 'shelf') continue;
+    ctx.strokeRect(
+      (panel.center.x - panel.size.x / 2) * zoom, (panel.center.z - panel.size.z / 2) * zoom,
+      panel.size.x * zoom, panel.size.z * zoom,
+    );
+  }
+  ctx.lineWidth = selected ? 2 : 1;
+  ctx.strokeRect(min.x * zoom, min.z * zoom, (max.x - min.x) * zoom, (max.z - min.z) * zoom);
+  ctx.restore();
+}
+
+// ── Solid drawing ────────────────────────────────────────────────────
+
+/** Plan outline of a shape modelled in 3D. */
+export function drawSolid(cs: CanvasState, solid: Solid, selected: boolean): void {
+  if (!validSolid(solid)) return;
+  const { ctx } = cs;
+  ctx.save();
+  ctx.beginPath();
+  solidFootprint(solid).forEach((p, i) => {
+    const s = wts(cs, p.x, p.y);
+    if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+  });
+  ctx.closePath();
+  ctx.fillStyle = selected ? '#bfdbfe' : solid.color;
+  ctx.globalAlpha = 0.35;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = selected ? '#3b82f6' : '#555';
+  ctx.lineWidth = selected ? 2 : 1;
+  ctx.stroke();
   ctx.restore();
 }
 

@@ -141,6 +141,18 @@ export function readProject(value: unknown): Project {
       positioned(item, path); positive(item.diameter, `${path}.diameter`); number(item.height, `${path}.height`, 0);
       choice(item.shape, ['round', 'square'], `${path}.shape`); defaults(item, { color: '#cccccc' }); text(item.color, `${path}.color`);
     });
+    if (floor.solids !== undefined) elements('solids', (item, path) => {
+      for (const key of ['origin', 'u', 'v']) {
+        record(item[key], `${path}.${key}`);
+        for (const axis of ['x', 'y', 'z']) number(item[key][axis], `${path}.${key}.${axis}`);
+      }
+      if (!Array.isArray(item.profile) || item.profile.length < 3) fail(`${path}.profile`, 'must have at least three points');
+      item.profile.forEach((p: unknown, i: number) => point(p, `${path}.profile[${i}]`));
+      positive(item.depth, `${path}.depth`);
+      defaults(item, { color: '#ffffff', roughness: 0.5, metalness: 0 });
+      text(item.color, `${path}.color`); number(item.roughness, `${path}.roughness`, 0, 1); number(item.metalness, `${path}.metalness`, 0, 1);
+      booleans(item, ['curved', 'locked'], path);
+    });
     elements('rooms', (item, path) => {
       booleans(item, ['floorOpening'], path);
       // Saved room/group memberships may outlive deleted walls/objects. Preserve metadata.
@@ -181,6 +193,19 @@ export function readProject(value: unknown): Project {
       const path = `customEntourage[${i}]`; record(item, path); text(item.id, `${path}.id`, true);
       if (seen.has(item.id)) fail(`${path}.id`, 'duplicates another custom symbol');
       seen.add(item.id); text(item.name, `${path}.name`); text(item.dataUrl, `${path}.dataUrl`, true); positive(item.aspect, `${path}.aspect`);
+    }
+  }
+  if (project!.savedViews !== undefined) {
+    const seen = new Set<string>();
+    for (const [i, item] of list(project!, 'savedViews', 'document').entries()) {
+      const path = `savedViews[${i}]`; record(item, path); text(item.id, `${path}.id`, true);
+      if (seen.has(item.id)) fail(`${path}.id`, 'duplicates another saved view');
+      seen.add(item.id); text(item.name, `${path}.name`);
+      for (const key of ['position', 'target']) {
+        const point = record(item[key], `${path}.${key}`);
+        for (const axis of ['x', 'y', 'z']) number(point[axis], `${path}.${key}.${axis}`);
+      }
+      if (item.floorId !== undefined) text(item.floorId, `${path}.floorId`);
     }
   }
   for (const key of ['createdAt', 'updatedAt']) {
