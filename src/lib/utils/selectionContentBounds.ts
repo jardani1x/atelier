@@ -14,6 +14,7 @@ export function selectionContentBounds(floor: Floor, ids: ReadonlySet<string>, o
     windows:floor.windows.filter(item=>ids.has(item.id)||wallIds.has(item.wallId)),
     furniture:floor.furniture.filter(item=>ids.has(item.id)),
     stairs:floor.stairs?.filter(item=>ids.has(item.id)),columns:floor.columns?.filter(item=>ids.has(item.id)),
+    cabinets:floor.cabinets?.filter(item=>ids.has(item.id)),solids:floor.solids?.filter(item=>ids.has(item.id)),
     entourage:floor.entourage?.filter(item=>ids.has(item.id)),textAnnotations:floor.textAnnotations?.filter(item=>ids.has(item.id)),
     measurements:floor.measurements?.filter(item=>ids.has(item.id)),annotations:floor.annotations?.filter(item=>ids.has(item.id)),
   };

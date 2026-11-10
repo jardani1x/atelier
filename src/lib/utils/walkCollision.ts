@@ -116,7 +116,7 @@ export function buildWalkObstacles(floor: Floor, options: WalkObstacleOptions): 
     const size = getFurnitureSize(item);
     if (blocks(0, size.height)) out.push(rotated(item.position.x, item.position.y, size.width, size.depth, item.rotation));
   }
-  for (const column of floor.columns) {
+  for (const column of floor.columns ?? []) {
     if (!blocks(0, column.height)) continue;
     if (column.shape === 'round') {
       out.push({ x: column.position.x, y: column.position.y, halfWidth: 0, halfDepth: 0, cos: 1, sin: 0, round: column.diameter / 2 });

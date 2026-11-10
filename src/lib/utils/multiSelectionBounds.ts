@@ -7,6 +7,7 @@ import { furniturePlanBounds } from './furniturePlanBounds';
 import { stairPlanBounds } from './stairPlanGeometry';
 import { columnPlanBounds } from './columnPlanGeometry';
 import { entourageAspect } from './canvasRenderer';
+import { cabinetPlanBounds, solidPlanBounds } from './builtInPlanGeometry';
 
 type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 /** Extents for the element kinds supported by the existing group-selection UI. */
@@ -22,6 +23,8 @@ export function multiSelectionBounds(floor: Floor, ids: ReadonlySet<string>, cus
   for (const item of floor.furniture) if (ids.has(item.id)) add(furniturePlanBounds(item));
   for (const item of floor.stairs ?? []) if (ids.has(item.id)) add(stairPlanBounds(item));
   for (const item of floor.columns ?? []) if (ids.has(item.id)) add(columnPlanBounds(item));
+  for (const item of floor.cabinets ?? []) if (ids.has(item.id)) add(cabinetPlanBounds(item));
+  for (const item of floor.solids ?? []) if (ids.has(item.id)) { const b = solidPlanBounds(item); if (b) add(b); }
   for (const item of floor.entourage ?? []) if (ids.has(item.id)) add(entouragePlanBounds(item, entourageAspect(item.defId, customDefs)));
   for (const [kind, openings] of [['door',floor.doors ?? []],['window',floor.windows ?? []]] as const) {
     for (const item of openings) if (ids.has(item.id)) {
@@ -31,7 +34,7 @@ export function multiSelectionBounds(floor: Floor, ids: ReadonlySet<string>, cus
   }
   if (context) {
     const annotationBounds = planContentBounds({ ...floor, walls: [], doors: [], windows: [],
-      furniture: [], stairs: [], columns: [], entourage: [], backgroundImage: undefined,
+      furniture: [], stairs: [], columns: [], cabinets: [], solids: [], entourage: [], backgroundImage: undefined,
       textAnnotations: floor.textAnnotations?.filter(item => ids.has(item.id)),
       measurements: floor.measurements?.filter(item => ids.has(item.id)),
       annotations: floor.annotations?.filter(item => ids.has(item.id)),

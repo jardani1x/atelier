@@ -1405,6 +1405,7 @@ export const pt = {
   "cloud.errorGone": "Este projeto não está mais na nuvem.",
   "cloud.errorInvalid": "Não foi possível ler este projeto da nuvem.",
   "cloud.errorFailed": "Não foi possível acessar a nuvem. Seu projeto continua salvo neste dispositivo.",
+  "cloud.errorCredentials": "O e-mail ou a senha está incorreto.",
   "cloud.errorLocal": "O projeto não pôde ser salvo neste dispositivo, então não foi enviado à nuvem.",
   "saveControls.saveAs": "Salvar como",
   "saveControls.saveAsName": "Nome do projeto",

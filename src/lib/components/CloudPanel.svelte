@@ -5,7 +5,7 @@
   import { t } from '$lib/i18n';
   import { CloudError, type CloudProject } from '$lib/services/cloudStore';
   import { storageErrorMessage } from '$lib/services/datastore';
-  import { cloudConfigured, cloudErrorKeys, cloudStore, cloudUser, initCloud, signIn, signOut, signUp } from '$lib/stores/cloud';
+  import { CloudAuthError, cloudConfigured, cloudErrorKeys, cloudStore, cloudUser, initCloud, signIn, signOut, signUp } from '$lib/stores/cloud';
 
   let email = $state('');
   let password = $state('');
@@ -25,6 +25,7 @@
 
   function describe(cause: unknown): string {
     if (cause instanceof CloudError) return $t(cloudErrorKeys[cause.code]);
+    if (cause instanceof CloudAuthError) return cause.credentials ? $t('cloud.errorCredentials') : cause.message;
     return storageErrorMessage(cause);
   }
 

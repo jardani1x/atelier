@@ -141,6 +141,19 @@ export function readProject(value: unknown): Project {
       positioned(item, path); positive(item.diameter, `${path}.diameter`); number(item.height, `${path}.height`, 0);
       choice(item.shape, ['round', 'square'], `${path}.shape`); defaults(item, { color: '#cccccc' }); text(item.color, `${path}.color`);
     });
+    if (floor.cabinets !== undefined) elements('cabinets', (item, path) => {
+      positioned(item, path);
+      for (const key of ['width', 'height', 'depth', 'thickness']) positive(item[key], `${path}.${key}`);
+      defaults(item, { compartments: 1, shelves: [], doors: 'none', color: '#ffffff', roughness: 0.5, metalness: 0 });
+      number(item.compartments, `${path}.compartments`, 1);
+      if (!Array.isArray(item.shelves)) fail(`${path}.shelves`, 'must be an array');
+      item.shelves.forEach((shelf: unknown, i: number) => number(shelf, `${path}.shelves[${i}]`));
+      choice(item.doors, ['none', 'hinged', 'sliding'], `${path}.doors`);
+      text(item.color, `${path}.color`); number(item.roughness, `${path}.roughness`, 0, 1); number(item.metalness, `${path}.metalness`, 0, 1);
+      if (item.transmission !== undefined) number(item.transmission, `${path}.transmission`, 0, 1);
+      if (item.elevation !== undefined) number(item.elevation, `${path}.elevation`);
+      strings(item, ['name'], path); booleans(item, ['locked'], path);
+    });
     if (floor.solids !== undefined) elements('solids', (item, path) => {
       for (const key of ['origin', 'u', 'v']) {
         record(item[key], `${path}.${key}`);

@@ -1,8 +1,13 @@
 import type { Floor, Point } from '$lib/models/types';
 import { wallPointAt } from './canvasRenderer';
+import { solidPlanCenter } from './builtInPlanGeometry';
 
 export interface MarqueeRect { minX: number; maxX: number; minY: number; maxY: number }
-export interface MarqueeLayers { measurements: boolean; annotations: boolean; textAnnotations: boolean }
+export interface MarqueeLayers {
+  measurements: boolean; annotations: boolean; textAnnotations: boolean;
+  /** Cabinets and solids are drawn on the furniture layer; absent means visible. */
+  furniture?: boolean;
+}
 
 /**
  * Ids a drag-select rectangle encloses: walls, dimensions and notes by both ends, everything else by
@@ -18,6 +23,10 @@ export function marqueeSelectionIds(floor: Floor, rect: MarqueeRect, layers: Mar
     if (wall && inside(wallPointAt(wall, opening.position))) ids.push(opening.id);
   }
   for (const item of [...floor.furniture, ...(floor.stairs ?? []), ...(floor.columns ?? []), ...(floor.entourage ?? [])]) if (inside(item.position)) ids.push(item.id);
+  if (layers.furniture !== false) {
+    for (const cabinet of floor.cabinets ?? []) if (inside(cabinet.position)) ids.push(cabinet.id);
+    for (const solid of floor.solids ?? []) { const center = solidPlanCenter(solid); if (center && inside(center)) ids.push(solid.id); }
+  }
   if (layers.textAnnotations) for (const note of floor.textAnnotations ?? []) if (inside(note)) ids.push(note.id);
   for (const line of [...(layers.measurements ? floor.measurements ?? [] : []), ...(layers.annotations ? floor.annotations ?? [] : [])]) {
     if (inside({ x: line.x1, y: line.y1 }) && inside({ x: line.x2, y: line.y2 })) ids.push(line.id);
