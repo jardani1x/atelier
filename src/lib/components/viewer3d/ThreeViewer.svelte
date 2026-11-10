@@ -89,6 +89,8 @@
   let pathTraceState = $state<'off' | 'starting' | 'on'>('off');
   let pathTraceTarget = $state(Infinity);
   let pathTraceKey = '';
+  /** Key of the trace being built, so setting changes during the build do not restart an identical one. */
+  let pathTracePendingKey = '';
   let pathTraceDisplayDirty = false;
   let renderSamples = $state(0);
   let renderError = $state(false);
@@ -102,8 +104,9 @@
       if (!renderer || renderedSignature === null) return;
       renderer.toneMappingExposure = enabled ? settings.exposure : 1.2;
       pathTrace?.setDenoise(settings.denoise);
-      if (enabled && (pathTraceState === 'off' || pathTraceKey !== renderTraceKey(settings))) void startPathTrace();
-      else if (!enabled && pathTraceKey) { pathTraceKey = ''; stopPathTrace(); }
+      const activeKey = pathTraceState === 'starting' ? pathTracePendingKey : pathTraceKey;
+      if (enabled && (pathTraceState === 'off' || activeKey !== renderTraceKey(settings))) void startPathTrace();
+      else if (!enabled && (pathTraceKey || pathTracePendingKey)) { pathTraceKey = pathTracePendingKey = ''; stopPathTrace(); }
       else if (pathTrace) { pathTraceDisplayDirty = true; requestRender(); }
     });
   });
@@ -140,6 +143,7 @@
     setOrthographic(false);
     const run = pathTraceRun;
     pathTraceState = 'starting';
+    pathTracePendingKey = $renderModeEnabled ? renderTraceKey($renderSettings) : '';
     delete renderer.domElement.dataset.traceError;
     delete renderer.domElement.dataset.traceSamples;
     try {
@@ -161,6 +165,7 @@
       pathTrace = trace;
       pathTraceTarget = quality?.targetSamples ?? Infinity;
       pathTraceKey = settings ? renderTraceKey(settings) : '';
+      pathTracePendingKey = '';
       renderer.domElement.dataset.traceKey = pathTraceKey;
       renderError = false;
       pathTraceState = 'on';
@@ -172,6 +177,7 @@
       console.error('Path trace failed to start', error instanceof Error ? error.stack : error);
       renderer.domElement.dataset.traceError = error instanceof Error ? error.message : String(error);
       renderError = true;
+      pathTracePendingKey = '';
       stopPathTrace();
     }
   }
@@ -1095,7 +1101,7 @@
     });
 
     modelingTools = createModelingTools({
-      camera: () => camera,
+      camera: viewCamera,
       root: () => wallGroup,
       scene: () => scene,
       floor: () => get(activeFloor) ?? null,

@@ -25,7 +25,7 @@ export function planAlignment(floor: Floor, ids: ReadonlySet<string>, op: Alignm
   const annotationRects = context ? alignmentItems(floor, ids).flatMap(item => {
     if ('position' in item || 'start' in item) return [];
     const bounds = planContentBounds({ ...floor, walls: [], doors: [], windows: [], furniture: [],
-      stairs: [], columns: [], entourage: [], backgroundImage: undefined,
+      stairs: [], columns: [], cabinets: [], solids: [], entourage: [], backgroundImage: undefined,
       textAnnotations: (floor.textAnnotations ?? []).filter(n => n.id === item.id),
       measurements: (floor.measurements ?? []).filter(n => n.id === item.id),
       annotations: (floor.annotations ?? []).filter(n => n.id === item.id),

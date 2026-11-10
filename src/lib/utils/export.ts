@@ -6,6 +6,9 @@ import { getEntourageDef } from './entourageCatalog';
 import { entouragePlanBounds } from './entouragePlanBounds';
 import { planContentBounds } from './planContentBounds';
 import { columnPlanBounds } from './columnPlanGeometry';
+import { cabinetPanelPlanCorners, cabinetPlanBounds, cabinetPlanCorners, solidPlanBounds } from './builtInPlanGeometry';
+import { cabinetPanels } from './cabinetGeometry';
+import { solidFootprint, validSolid } from './solids';
 import { hasPlanExportContent } from './planExportContent';
 import { dimensionPlanGeometry } from './dimensionPlanGeometry';
 import { textAnnotationBounds, textAnnotationLines } from './textAnnotationLayout';
@@ -21,7 +24,7 @@ import { wallDimensionLabel } from './wallDimensionLabel';
 import type { Project, Floor, FurnitureItem } from '$lib/models/types';
 import { getCatalogItem, getFurnitureSize } from '$lib/utils/furnitureCatalog';
 import { resolveRooms, getRoomPolygon, roomLabelPosition } from '$lib/utils/roomDetection';
-import { drawStair, drawFurnitureItem, drawColumn, drawDoorOnWall, drawWindowOnWall, drawEntourageItems, drawTextAnnotations, drawAnnotations, drawPersistedMeasurements } from '$lib/utils/canvasRenderer';
+import { drawStair, drawFurnitureItem, drawColumn, drawCabinet, drawSolid, drawDoorOnWall, drawWindowOnWall, drawEntourageItems, drawTextAnnotations, drawAnnotations, drawPersistedMeasurements } from '$lib/utils/canvasRenderer';
 import type { CanvasState } from '$lib/utils/canvasInteraction';
 import { projectSettings, formatArea, formatLength } from '$lib/stores/settings';
 import { currentPlanExportVisibility } from '$lib/stores/planVisibility';
@@ -123,7 +126,7 @@ function extendBoundsForStairs(floor: Floor, bounds: { minX: number; minY: numbe
   if (!floor.stairs?.length) return;
   const context=document.createElement('canvas').getContext('2d');
   if (!context) return;
-  const b=planContentBounds({...floor,walls:[],doors:[],windows:[],rooms:[],furniture:[],columns:[],entourage:[],measurements:[],annotations:[],textAnnotations:[],backgroundImage:undefined}, {context,entourageAspect:()=>1});
+  const b=planContentBounds({...floor,walls:[],doors:[],windows:[],rooms:[],furniture:[],columns:[],cabinets:[],solids:[],entourage:[],measurements:[],annotations:[],textAnnotations:[],backgroundImage:undefined}, {context,entourageAspect:()=>1});
   if (!b) return;
   bounds.minX=Math.min(bounds.minX,b.minX); bounds.minY=Math.min(bounds.minY,b.minY);
   bounds.maxX=Math.max(bounds.maxX,b.maxX); bounds.maxY=Math.max(bounds.maxY,b.maxY);
@@ -132,6 +135,15 @@ function extendBoundsForStairs(floor: Floor, bounds: { minX: number; minY: numbe
 function extendBoundsForColumns(floor: Floor, bounds: { minX: number; minY: number; maxX: number; maxY: number }) {
   for (const column of floor.columns ?? []) {
     const b = columnPlanBounds(column);
+    bounds.minX = Math.min(bounds.minX, b.minX); bounds.minY = Math.min(bounds.minY, b.minY);
+    bounds.maxX = Math.max(bounds.maxX, b.maxX); bounds.maxY = Math.max(bounds.maxY, b.maxY);
+  }
+}
+
+function extendBoundsForBuiltIns(floor: Floor, bounds: { minX: number; minY: number; maxX: number; maxY: number }) {
+  const found = [...(floor.cabinets ?? []).map(cabinetPlanBounds), ...(floor.solids ?? []).map(solidPlanBounds)];
+  for (const b of found) {
+    if (!b) continue;
     bounds.minX = Math.min(bounds.minX, b.minX); bounds.minY = Math.min(bounds.minY, b.minY);
     bounds.maxX = Math.max(bounds.maxX, b.maxX); bounds.maxY = Math.max(bounds.maxY, b.maxY);
   }
@@ -230,6 +242,7 @@ export async function exportAsPNG(canvas: HTMLCanvasElement | null, project?: Pr
       extendBoundsForOpenings(floor, bounds);
       if (visibility.roomLabels) extendBoundsForRoomLabels(floor, bounds);
       extendBoundsForColumns(floor, bounds);
+      extendBoundsForBuiltIns(floor, bounds);
       extendBoundsForStairs(floor, bounds);
       extendBoundsForText(floor, bounds);
       extendBoundsForDimensions(floor, bounds);
@@ -312,6 +325,8 @@ export async function exportAsPNG(canvas: HTMLCanvasElement | null, project?: Pr
 
       ctx.save();
       for (const stair of floor.stairs ?? []) drawStair({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, stair, false);
+      for (const cabinet of floor.cabinets ?? []) drawCabinet({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, cabinet, false);
+      for (const solid of floor.solids ?? []) drawSolid({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, solid, false);
       for (const column of floor.columns ?? []) drawColumn({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, column, false);
       drawPersistedMeasurements({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, floor, null, get(projectSettings));
       ctx.restore();
@@ -371,6 +386,7 @@ export function exportAsSVG(project: Project, language: Locale = 'en', visibilit
   extendBoundsForOpenings(floor, svgBounds);
   if (visibility.roomLabels) extendBoundsForRoomLabels(floor, svgBounds);
   extendBoundsForColumns(floor, svgBounds);
+  extendBoundsForBuiltIns(floor, svgBounds);
   extendBoundsForStairs(floor, svgBounds);
   extendBoundsForText(floor, svgBounds);
   extendBoundsForDimensions(floor, svgBounds);
@@ -537,6 +553,21 @@ export function exportAsSVG(project: Project, language: Locale = 'en', visibilit
 
   for (const stair of floor.stairs ?? []) {
     paths+=`<g data-stair="${escapeXml(stair.id)}">${canvasSymbolSvg(ctx=>drawStair({ctx,width:pad*2,height:pad*2,zoom:1,camX:minX,camY:minY},stair,false))}</g>\n`;
+  }
+  // Written out rather than replayed from the canvas drawing, which fills through globalAlpha.
+  const svgPoints = (points: { x: number; y: number }[]) => points.map(p => `${p.x - minX + pad},${p.y - minY + pad}`).join(' ');
+  for (const cabinet of floor.cabinets ?? []) {
+    paths += `  <g data-cabinet="${escapeXml(cabinet.id)}" stroke="#555" stroke-width="1">\n`;
+    paths += `    <polygon points="${svgPoints(cabinetPlanCorners(cabinet))}" fill="${escapeXml(cabinet.color)}" fill-opacity=".35"/>\n`;
+    for (const panel of cabinetPanels(cabinet)) {
+      if (panel.role === 'top' || panel.role === 'bottom' || panel.role === 'shelf') continue;
+      paths += `    <polygon points="${svgPoints(cabinetPanelPlanCorners(cabinet, panel))}" fill="none"/>\n`;
+    }
+    paths += `  </g>\n`;
+  }
+  for (const solid of floor.solids ?? []) {
+    if (!validSolid(solid)) continue;
+    paths += `  <polygon data-solid="${escapeXml(solid.id)}" points="${svgPoints(solidFootprint(solid))}" fill="${escapeXml(solid.color)}" fill-opacity=".35" stroke="#555" stroke-width="1"/>\n`;
   }
   for (const column of floor.columns ?? []) {
     const x = column.position.x - minX + pad, y = column.position.y - minY + pad;
@@ -731,6 +762,7 @@ function renderPDF(project: Project, preparedImages: ReadonlyMap<string,HTMLImag
   extendBoundsForOpenings(floor, pdfBounds);
   if (visibility.roomLabels) extendBoundsForRoomLabels(floor, pdfBounds);
   extendBoundsForColumns(floor, pdfBounds);
+  extendBoundsForBuiltIns(floor, pdfBounds);
   extendBoundsForStairs(floor, pdfBounds);
   extendBoundsForText(floor, pdfBounds);
   extendBoundsForDimensions(floor, pdfBounds);
@@ -809,6 +841,8 @@ function renderPDF(project: Project, preparedImages: ReadonlyMap<string,HTMLImag
 
   ctx.save();
   for (const stair of floor.stairs ?? []) drawStair({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, stair, false);
+  for (const cabinet of floor.cabinets ?? []) drawCabinet({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, cabinet, false);
+  for (const solid of floor.solids ?? []) drawSolid({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, solid, false);
   for (const column of floor.columns ?? []) drawColumn({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, column, false);
   drawPersistedMeasurements({ ctx, width: pad * 2, height: pad * 2, zoom: 1, camX: minX, camY: minY }, floor, null, get(projectSettings));
   ctx.restore();

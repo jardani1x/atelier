@@ -1411,6 +1411,7 @@ export const en = {
   "cloud.errorGone": "This design is no longer in the cloud.",
   "cloud.errorInvalid": "This cloud design could not be read.",
   "cloud.errorFailed": "Could not reach the cloud. Your design is still saved on this device.",
+  "cloud.errorCredentials": "The email or password is incorrect.",
   "cloud.errorLocal": "The design could not be saved on this device, so it was not sent to the cloud.",
   "saveControls.saveAs": "Save As",
   "saveControls.saveAsName": "Project name",

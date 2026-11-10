@@ -38,6 +38,9 @@ export function visiblePlanFloor(floor: Floor, visibility: PlanExportVisibility)
     furniture: visibility.furniture ? floor.furniture : [],
     stairs: visibility.stairs ? floor.stairs : [],
     columns: visibility.columns ? floor.columns : [],
+    // Cabinets and modelled solids share the furniture layer in the 2D view.
+    cabinets: visibility.furniture ? floor.cabinets : [],
+    solids: visibility.furniture ? floor.solids : [],
     entourage: visibility.entourage ? floor.entourage : [],
     measurements: visibility.measurements ? floor.measurements : [],
     annotations: visibility.annotations ? floor.annotations : [],

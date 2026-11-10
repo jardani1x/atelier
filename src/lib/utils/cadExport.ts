@@ -5,6 +5,9 @@ import { getEntourageDef } from './entourageCatalog';
 import { canvasSymbolDxf } from './canvasSymbolDxf';
 import { drawStair } from './canvasRenderer';
 import { columnPlanCorners } from './columnPlanGeometry';
+import { cabinetPanelPlanCorners, cabinetPlanCorners } from './builtInPlanGeometry';
+import { cabinetPanels } from './cabinetGeometry';
+import { solidFootprint, validSolid } from './solids';
 import { hasPlanExportContent } from './planExportContent';
 import { cadText } from './exportText';
 import { dimensionPlanGeometry } from './dimensionPlanGeometry';
@@ -227,6 +230,17 @@ export function exportDXF(project: Project, language: Locale = 'en', visibility:
   d.addLayer('STAIRS', 8, 'CONTINUOUS');
   d.setActiveLayer('STAIRS');
   for (const stair of floor.stairs ?? []) canvasSymbolDxf(d,ctx=>drawStair({ctx,width:0,height:0,zoom:1,camX:0,camY:0},stair,false));
+
+  d.addLayer('CABINETS', 8, 'CONTINUOUS');
+  d.setActiveLayer('CABINETS');
+  const closed = (points: { x: number; y: number }[]) => d.drawPolyline([...points, points[0]].map(p => [p.x, -p.y]));
+  for (const cabinet of floor.cabinets ?? []) {
+    closed(cabinetPlanCorners(cabinet));
+    for (const panel of cabinetPanels(cabinet)) {
+      if (panel.role !== 'top' && panel.role !== 'bottom' && panel.role !== 'shelf') closed(cabinetPanelPlanCorners(cabinet, panel));
+    }
+  }
+  for (const solid of floor.solids ?? []) if (validSolid(solid)) closed(solidFootprint(solid));
 
   d.addLayer('COLUMNS', 7, 'CONTINUOUS');
   d.setActiveLayer('COLUMNS');

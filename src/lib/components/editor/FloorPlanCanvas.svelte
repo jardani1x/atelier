@@ -309,6 +309,10 @@
           if (fi) { if (!fi.locked) origPositions.set(id, { position: { ...fi.position } }); continue; }
           if (currentFloor.stairs) { const st = currentFloor.stairs.find(s => s.id === id); if (st) { origPositions.set(id, { position: { ...st.position } }); continue; } }
           if (currentFloor.columns) { const col = currentFloor.columns.find(c => c.id === id); if (col) { origPositions.set(id, { position: { ...col.position } }); continue; } }
+          const cabinet = currentFloor.cabinets?.find(c => c.id === id);
+          if (cabinet) { if (!cabinet.locked) origPositions.set(id, { position: { ...cabinet.position } }); continue; }
+          const solid = currentFloor.solids?.find(s => s.id === id);
+          if (solid) { if (!solid.locked) origPositions.set(id, { position: { x: solid.origin.x, y: solid.origin.z } }); continue; }
         }
         for (const item of currentFloor.entourage ?? []) {
           if (currentSelectedIds.has(item.id) && !item.locked) origPositions.set(item.id, { position: { ...item.position } });
@@ -325,6 +329,7 @@
     const ids = new Set<string>();
     for (const items of [currentFloor.walls, currentFloor.furniture, currentFloor.doors,
       currentFloor.windows, currentFloor.stairs, currentFloor.columns, currentFloor.entourage,
+      layerVis.furniture ? currentFloor.cabinets : [], layerVis.furniture ? currentFloor.solids : [],
       layerVis.textAnnotations ? currentFloor.textAnnotations : [],
       layerVis.measurements ? currentFloor.measurements : [], layerVis.annotations ? currentFloor.annotations : []]) {
       for (const item of items ?? []) ids.add(item.id);
@@ -2572,27 +2577,7 @@
         return false;
       }
 
-      const solid = findSolidAt(wp, currentFloor?.solids);
-      if (solid) {
-        if (selectElement(solid.id, e.shiftKey)) return;
-        if (!e.shiftKey && !solid.locked) {
-          draggingSolidId = solid.id;
-          solidDragOffset = { x: wp.x - solid.origin.x, y: wp.y - solid.origin.z };
-        }
-        return;
-      }
-
-      const cabinet = findCabinetAt(wp, currentFloor?.cabinets);
-      if (cabinet) {
-        if (selectElement(cabinet.id, e.shiftKey)) return;
-        if (!e.shiftKey && !cabinet.locked) {
-          draggingCabinetId = cabinet.id;
-          cabinetDragOffset = { x: wp.x - cabinet.position.x, y: wp.y - cabinet.position.y };
-        }
-        return;
-      }
-
-      // Check columns
+      // Columns are drawn above cabinets and solids, so they are tested first.
       const col = findColumnAt(wp);
       if (col) {
         if (selectElement(col.id, e.shiftKey)) return;
@@ -2602,6 +2587,27 @@
         }
         return;
       }
+      // Hidden layers are not drawn, so they must not catch clicks either.
+      const solid = layerVis.furniture ? findSolidAt(wp, currentFloor?.solids) : null;
+      if (solid) {
+        if (selectElement(solid.id, e.shiftKey)) return;
+        if (!e.shiftKey && !solid.locked) {
+          draggingSolidId = solid.id;
+          solidDragOffset = { x: wp.x - solid.origin.x, y: wp.y - solid.origin.z };
+        }
+        return;
+      }
+
+      const cabinet = layerVis.furniture ? findCabinetAt(wp, currentFloor?.cabinets) : null;
+      if (cabinet) {
+        if (selectElement(cabinet.id, e.shiftKey)) return;
+        if (!e.shiftKey && !cabinet.locked) {
+          draggingCabinetId = cabinet.id;
+          cabinetDragOffset = { x: wp.x - cabinet.position.x, y: wp.y - cabinet.position.y };
+        }
+        return;
+      }
+
       // Check stairs
       const stair = findStairAt(wp);
       if (stair) {
@@ -2919,6 +2925,9 @@
           if (fi) { moveFurniture(id, newPos); continue; }
           if (currentFloor.stairs) { const st = currentFloor.stairs.find(s => s.id === id); if (st) { moveStair(id, newPos); continue; } }
           if (currentFloor.columns) { const col = currentFloor.columns.find(c => c.id === id); if (col) { moveColumn(id, newPos); continue; } }
+          if (currentFloor.cabinets?.some(c => c.id === id)) { moveCabinet(id, newPos); continue; }
+          const solid = currentFloor.solids?.find(s => s.id === id);
+          if (solid) { moveSolid(id, { x: newPos.x, y: solid.origin.y, z: newPos.y }); continue; }
           if (currentFloor.entourage?.some(item => item.id === id)) moveEntourage(id, newPos);
         }
       }

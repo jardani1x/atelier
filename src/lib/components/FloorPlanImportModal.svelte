@@ -61,13 +61,18 @@
     busy = true; problem = null;
     // Let the busy state paint before the synchronous image work starts.
     await new Promise(resolve => setTimeout(resolve));
-    const context = plan.getContext('2d', { willReadFrequently: true });
-    if (context) {
+    try {
+      const context = plan.getContext('2d', { willReadFrequently: true });
+      if (!context) { problem = 'unreadable'; return; }
       const result = detectFloorPlan(context.getImageData(0, 0, plan.width, plan.height), scale);
       if (result.walls.length) { draft = result; cmPerPixel = scale; }
       else problem = 'nothingFound';
+    } catch (error) {
+      console.error('Floor plan detection failed', error);
+      problem = 'unreadable';
+    } finally {
+      busy = false;
     }
-    busy = false;
   }
 
   function build() {

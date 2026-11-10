@@ -47,7 +47,7 @@ export function pastePlanSelection(source: Floor, floor: Floor, selected: Readon
       (items as typeof copy[]).push(copy);
     }
   }
-  for (const key of ['furniture', 'stairs', 'columns', 'entourage'] as const) {
+  for (const key of ['furniture', 'stairs', 'columns', 'cabinets', 'entourage'] as const) {
     for (const item of [...source[key] ?? []]) {
       if (!selected.has(item.id)) continue;
       const copy = structuredClone(item);
@@ -56,6 +56,14 @@ export function pastePlanSelection(source: Floor, floor: Floor, selected: Readon
       const items = floor[key] ?? (floor[key] = []);
       (items as typeof copy[]).push(copy);
     }
+  }
+  for (const solid of [...source.solids ?? []]) {
+    if (!selected.has(solid.id)) continue;
+    const copy = structuredClone(solid);
+    copy.id = uid(); mapping.set(solid.id, copy.id);
+    // Solids are placed in 3D: plan x and y are origin.x and origin.z.
+    copy.origin = { ...copy.origin, x: copy.origin.x + 30 * step, z: copy.origin.z + 30 * step };
+    (floor.solids ??= []).push(copy);
   }
   for (const key of ['textAnnotations','measurements','annotations'] as const) {
     for (const item of [...source[key] ?? []]) {
