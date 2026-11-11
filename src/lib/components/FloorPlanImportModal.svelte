@@ -2,12 +2,12 @@
   import { t } from '$lib/i18n';
   import type { Point } from '$lib/models/types';
   import { loadPlanFile, planDataUrl, PlanFileFailure, type PlanFileError } from '$lib/services/floorPlanFile';
-  import { activeFloor, importFloorPlan } from '$lib/stores/project';
+  import { activeFloor, importFloorPlan, setBackgroundImage } from '$lib/stores/project';
   import { parseLengthInput, projectSettings } from '$lib/stores/settings';
-  import { cmPerPixelFrom, detectFloorPlan, type PlanDraft } from '$lib/utils/floorPlanDetect';
+  import { autoDetectFloorPlan, cmPerPixelFrom, detectFloorPlan, type PlanDraft } from '$lib/utils/floorPlanDetect';
   import { modalDialog, reconcileNativeClose } from '$lib/utils/modalDialog';
 
-  let { onclose }: { onclose: () => void } = $props();
+  let { onclose, file }: { onclose: () => void; file?: File } = $props();
 
   type Problem = PlanFileError | 'nothingFound';
   const LOW_COVERAGE = 0.85;
@@ -22,6 +22,8 @@
   let distance = $state('');
   let draft = $state<PlanDraft | null>(null);
   let cmPerPixel = $state(1);
+  /** True while the draft uses a guessed scale rather than one the user measured. */
+  let estimated = $state(false);
   let busy = $state(false);
   let problem = $state<Problem | null>(null);
 
@@ -37,12 +39,28 @@
       const loaded = await loadPlanFile(file, pageNumber);
       source = file; plan = loaded.canvas; pages = loaded.pages; page = pageNumber;
       points = []; draft = null;
+      // Let the plan paint before the synchronous image work starts.
+      await new Promise(resolve => setTimeout(resolve));
+      autoDetect(loaded.canvas);
     } catch (error) {
       problem = error instanceof PlanFileFailure ? error.code : 'unreadable';
     } finally {
       busy = false;
     }
   }
+
+  /** Detects straight away with an estimated scale. A plan it cannot read is left for manual calibration. */
+  function autoDetect(canvas: HTMLCanvasElement) {
+    try {
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      const result = context && autoDetectFloorPlan(context.getImageData(0, 0, canvas.width, canvas.height));
+      if (result) { draft = result.draft; cmPerPixel = result.cmPerPixel; estimated = true; }
+    } catch (error) {
+      console.error('Automatic floor plan detection failed', error);
+    }
+  }
+
+  $effect(() => { if (file) void open(file); });
 
   function pasted(event: ClipboardEvent) {
     const file = [...(event.clipboardData?.files ?? [])].find(item => item.type.startsWith('image/'));
@@ -65,7 +83,7 @@
       const context = plan.getContext('2d', { willReadFrequently: true });
       if (!context) { problem = 'unreadable'; return; }
       const result = detectFloorPlan(context.getImageData(0, 0, plan.width, plan.height), scale);
-      if (result.walls.length) { draft = result; cmPerPixel = scale; }
+      if (result.walls.length) { draft = result; cmPerPixel = scale; estimated = false; }
       else problem = 'nothingFound';
     } catch (error) {
       console.error('Floor plan detection failed', error);
@@ -80,6 +98,12 @@
     importFloorPlan(draft, plan, cmPerPixel, {
       dataUrl: planDataUrl(plan), position: { x: 0, y: 0 }, scale: cmPerPixel, opacity: 0.4, rotation: 0, locked: true,
     });
+    onclose();
+  }
+
+  function backgroundOnly() {
+    if (!plan) return;
+    setBackgroundImage({ dataUrl: planDataUrl(plan), position: { x: 0, y: 0 }, scale: draft ? cmPerPixel : scale ?? 1, opacity: 0.4, rotation: 0, locked: false });
     onclose();
   }
 
@@ -153,6 +177,7 @@
         {#if draft}
           <p class="mt-3 font-medium" data-testid="plan-counts">{$t('floorPlanImport.found', { walls: draft.walls.length, doors: doorCount, windows: windowCount })}</p>
           <p class="mt-1 text-xs text-gray-500">{$t('floorPlanImport.legend')}</p>
+          {#if estimated}<p class="mt-2 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-900" role="status" data-testid="plan-estimated">{$t('floorPlanImport.estimated', { width: Math.round(plan.width * cmPerPixel / 10) / 10, height: Math.round(plan.height * cmPerPixel / 10) / 10 })}</p>{/if}
           {#if draft.coverage < LOW_COVERAGE}<p class="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900" role="status">{$t('floorPlanImport.lowCoverage')}</p>{/if}
           {#if floorHasWalls}<p class="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900" role="alert">{$t('floorPlanImport.floorNotEmpty')}</p>{/if}
         {:else}
@@ -175,8 +200,9 @@
 
     {#if plan}
       <div class="flex justify-end gap-2 border-t border-gray-100 px-5 py-3">
+        <button class="mr-auto rounded-lg px-3 py-2 text-sm hover:bg-gray-100" disabled={busy} onclick={backgroundOnly}>{$t('floorPlanImport.backgroundOnly')}</button>
         {#if draft}
-          <button class="rounded-lg px-3 py-2 text-sm hover:bg-gray-100" onclick={() => draft = null}>{$t('floorPlanImport.back')}</button>
+          <button class="rounded-lg px-3 py-2 text-sm hover:bg-gray-100" onclick={() => draft = null}>{$t(estimated ? 'floorPlanImport.setScale' : 'floorPlanImport.back')}</button>
           <button class="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50" disabled={floorHasWalls} onclick={build}>{$t('floorPlanImport.build')}</button>
         {:else}
           <button class="rounded-lg px-3 py-2 text-sm hover:bg-gray-100" disabled={busy} onclick={() => picker?.click()}>{$t('floorPlanImport.other')}</button>

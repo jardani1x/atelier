@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cmPerPixelFrom, detectFloorPlan, draftToElements, type PlanRaster } from '$lib/utils/floorPlanDetect';
+import { autoDetectFloorPlan, cmPerPixelFrom, detectFloorPlan, draftToElements, type PlanRaster } from '$lib/utils/floorPlanDetect';
 import { detectRooms } from '$lib/utils/roomDetection';
 
 function paper(width: number, height: number) {
@@ -130,6 +130,18 @@ describe('floor plan detection', () => {
     const { raster, rect } = paper(800, 800);
     for (let i = 0; i < 500; i++) rect(100 + i, 100 + i, 20, 20);
     expect(detectFloorPlan(raster, 1).walls).toHaveLength(0);
+  });
+
+  it('detects with no calibration, scaling the plan so its door is a standard door', () => {
+    const result = autoDetectFloorPlan(twoRoomPlan());
+    expect(result?.draft.walls).toHaveLength(5);
+    expect(result?.draft.openings.map(o => o.kind).sort()).toEqual(['door', 'window']);
+    // The door gap is 90 px, so a standard 85 cm door means a little under 1 cm per pixel.
+    expect(result?.cmPerPixel).toBeCloseTo(85 / 90, 1);
+  });
+
+  it('has no automatic result for blank paper', () => {
+    expect(autoDetectFloorPlan(paper(400, 300).raster)).toBeNull();
   });
 
   it('returns nothing for blank paper', () => {

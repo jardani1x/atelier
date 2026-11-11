@@ -28,6 +28,9 @@ async function detect(page: Page, file: string, pdfPage?: { number: number; of: 
     await page.getByLabel(`Page (of ${pdfPage.of})`).blur();
     await expect.poll(() => canvas.evaluate(element => (element as HTMLCanvasElement).toDataURL()), { timeout: 60_000 }).not.toBe(before);
   }
+  // Detection runs by itself with an estimated scale; step back to measure the real one.
+  await expect(page.getByTestId('plan-estimated')).toBeVisible({ timeout: 60_000 });
+  await page.getByRole('button', { name: 'Set exact scale', exact: true }).click();
   const box = (await canvas.boundingBox())!;
   // Outer face to outer face along the bottom wall is 620 sheet units: call that 6.2 m.
   await canvas.click({ position: { x: box.width * 100 / 800, y: box.height * 510 / 600 } });
@@ -79,6 +82,40 @@ test('builds walls, doors and windows from a PNG', async ({ page }, testInfo) =>
   await detect(page, file);
   await buildAndCheck(page);
   expect(errors).toEqual([]);
+});
+
+test('detects walls as soon as an image is imported, with no calibration', async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  await page.addInitScript(() => {
+    localStorage.setItem('o3d_tips_seen', JSON.stringify(['first-wall', 'first-furniture', 'first-3d', 'first-export', 'first-door']));
+    localStorage.setItem('hasSeenWelcome', 'true');
+  });
+  await page.goto('/editor');
+  await page.getByRole('button', { name: 'Build', exact: true }).click();
+  const dataUrl = await page.evaluate((rects) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 800; canvas.height = 600;
+    const context = canvas.getContext('2d')!;
+    context.fillStyle = '#fff'; context.fillRect(0, 0, 800, 600);
+    context.fillStyle = '#000';
+    for (const [x, y, w, h] of rects) context.fillRect(x, y, w, h);
+    return canvas.toDataURL('image/png');
+  }, RECTS);
+  const file = testInfo.outputPath('plan.png');
+  await writeFile(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
+  // The plain image import on an empty floor goes straight to detection.
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /Import Image/ }).click();
+  await (await chooser).setFiles(file);
+  await expect(page.getByTestId('plan-counts')).toHaveText('Found 5 walls, 1 doors, 1 windows', { timeout: 60_000 });
+  await expect(page.getByTestId('plan-estimated')).toBeVisible();
+  await page.getByRole('button', { name: 'Build walls', exact: true }).click();
+  const floor = await exported(page);
+  expect(floor.walls).toHaveLength(5);
+  expect(floor.doors).toHaveLength(1);
+  // The single door sets the scale: it comes out as a standard door.
+  expect(floor.doors[0].width).toBeGreaterThan(75);
+  expect(floor.doors[0].width).toBeLessThan(95);
 });
 
 test('builds walls from the chosen page of a PDF', async ({ page }, testInfo) => {

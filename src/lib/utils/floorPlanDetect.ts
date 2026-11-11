@@ -433,6 +433,42 @@ export function detectFloorPlan(raster: PlanRaster, cmPerPixel: number): PlanDra
   return hollow.walls.length > solid.walls.length ? hollow : solid;
 }
 
+/** Longest side of a typical dwelling, used as the first scale guess before any door is measured. */
+const TYPICAL_PLAN_CM = 1200;
+const TYPICAL_DOOR_CM = 85;
+
+/**
+ * Detects a plan with no calibration. The scale is first guessed from the size of the drawing,
+ * then corrected so the median door is a standard door width. The result is an estimate that the
+ * user can replace with a measured scale.
+ */
+export function autoDetectFloorPlan(raster: PlanRaster): { draft: PlanDraft; cmPerPixel: number } | null {
+  const { width, height } = raster;
+  const { ink } = inkMask(raster);
+  let left = width, right = -1, top = height, bottom = -1;
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    if (!ink[y * width + x]) continue;
+    if (x < left) left = x;
+    if (x > right) right = x;
+    if (y < top) top = y;
+    if (y > bottom) bottom = y;
+  }
+  const span = Math.max(right - left, bottom - top) + 1;
+  if (right < 0 || span < 50) return null;
+  let cmPerPixel = TYPICAL_PLAN_CM / span;
+  let draft = detectFloorPlan(raster, cmPerPixel);
+  const doors = draft.openings.filter(o => o.kind === 'door').map(o => o.width).sort((a, b) => a - b);
+  if (doors.length) {
+    const median = doors[Math.floor((doors.length - 1) / 2)];
+    const refined = Math.min(cmPerPixel * 2, Math.max(cmPerPixel / 2, TYPICAL_DOOR_CM / median));
+    if (Math.abs(refined / cmPerPixel - 1) > 0.1) {
+      const again = detectFloorPlan(raster, refined);
+      if (again.walls.length) { draft = again; cmPerPixel = refined; }
+    }
+  }
+  return draft.walls.length ? { draft, cmPerPixel } : null;
+}
+
 export interface DraftElements { walls: Wall[]; doors: Door[]; windows: Window[] }
 
 /** Converts a draft to plan elements placed exactly over an image centred at the origin. */
